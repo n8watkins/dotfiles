@@ -23,6 +23,9 @@ Only the description sits in an agent's context every session; the steps load wh
 | `github-access` | Deleting a repo, changing the `gh` login's permissions, touching repo secrets. |
 | `go-public` | Making a private repo public (scan the whole history for secrets first). |
 | `retire-repo` | Archiving, backlogging or deleting a project without losing anything. |
+| `merge-and-cleanup` | Squash-merging PRs (release notes, parallel PRs, stacked PRs) and cleaning up afterwards. |
+| `windows-testing` | Hands-on tests on the live Windows PC without disrupting the owner. |
+| `writing` | Drafting anything published in my name; includes a draft `VOICE.md`. |
 
 ## Rules for this repo
 

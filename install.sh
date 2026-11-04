@@ -20,6 +20,9 @@ link home/AGENTS.md "$HOME/.codex/AGENTS.md"
 
 # Hooks.
 link home/.claude/hooks/confirm-destructive-git.sh "$HOME/.claude/hooks/confirm-destructive-git.sh"
+for f in "$repo"/bin/*; do
+  link "bin/$(basename "$f")" "$HOME/.local/bin/$(basename "$f")"
+done
 for f in "$repo"/home/.config/agent-hooks/*.sh; do
   link "home/.config/agent-hooks/$(basename "$f")" "$HOME/.config/agent-hooks/$(basename "$f")"
 done

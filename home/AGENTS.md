@@ -12,6 +12,7 @@
 - For taste-driven or sweeping UI changes, show a quick desktop preview (then mobile) with a localhost link and screenshots, and get approval before full responsive work, tests and polish. Small, clear fixes skip the preview.
 - Deliver long reports, plans, status overviews and lists of decisions as a hosted HTML page (an Artifact) with a few lines plus the link in the terminal; keep quick updates and single questions in the terminal.
 - Next.js: dev servers and test stacks run on Turbopack. Never add `--webpack` to `next dev` and never cap the heap with `NODE_OPTIONS=--max-old-space-size`; if something seems to need webpack, find out why first.
+- Never delete with `rm -rf` (or `rm`) anything you did not create in this task: move it with `trash PATH` instead (dotfiles `bin/trash`, kept 14 days in `~/.local/share/agent-trash/<date>/`, restore with `mv`). This covers other agents' and earlier sessions' files, scratch folders you didn't make, worktrees, and anything in the owner's folders. Say what you trashed and where.
 - To wait for a background job, use its completion notification, its exit code or a sentinel file. Never wait or kill with `pgrep -f`/`pkill -f` on a pattern that appears in your own command line: it matches itself.
 - WSL username is `natkins`, Windows username is `natha`
 - Windows C: drive is accessible from WSL at `/mnt/c/`

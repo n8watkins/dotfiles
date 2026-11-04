@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Move files or folders to a dated trash folder instead of deleting them.
+# Kept 14 days, then purged on the next run. Restore with `mv` from the path printed.
+set -euo pipefail
+
+root="${TRASH_DIR:-$HOME/.local/share/agent-trash}"
+day="$(date +%Y-%m-%d)"
+mkdir -p "$root/$day"
+chmod 700 "$root" "$root/$day"
+
+# Purge days older than 14 days.
+find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf -- {} + 2>/dev/null || true
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: trash PATH..." >&2
+  exit 2
+fi
+
+for p in "$@"; do
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+    echo "trash: no such file: $p" >&2
+    continue
+  fi
+  abs="$(cd "$(dirname -- "$p")" && pwd)/$(basename -- "$p")"
+  dest="$root/$day$abs"
+  mkdir -p "$(dirname -- "$dest")"
+  if [ -e "$dest" ]; then dest="$dest.$(date +%H%M%S)"; fi
+  mv -- "$p" "$dest"
+  echo "trashed: $abs -> $dest"
+done

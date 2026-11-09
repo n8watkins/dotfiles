@@ -1,13 +1,24 @@
 ---
 name: demo-recording
-description: Use when recording, re-recording or reviewing an automated product demo clip (Playwright) of one of the owner's Chrome extensions or web apps, for a build page, homepage card, store listing or README. Covers pre-flight (latest build, throwaway profile, fixtures), camera and cursor rules, the storyboard, the review checklist and past mistakes.
+description: Use when recording, re-recording or reviewing an automated product demo clip (Playwright) of one of the owner's Chrome extensions or web apps, for a build page, homepage card, store listing or README. Covers the demo-kit pipeline (~/projects/demo-kit), pre-flight (latest build, throwaway profile, fixtures), camera and cursor rules, the storyboard, the review checklist and past mistakes.
 ---
 
 # Recording product demo clips
 
-Version 1.0, 2026-11-09.
+Version 1.1, 2026-11-09.
 Written after the owner's critique of the first extension clips (TL;DW, VoiceDock, TubeVault) on 2026-11-09.
-The existing pipeline lives in n8builds-web: `scripts/product-clips/` (extensions: `record-extensions.mjs`, `camera.mjs`, `encode.sh`) and `scripts/scribe-tour/` (a desktop app UI with a mocked backend and an in-page cursor, `overlay.js`).
+
+**The pipeline is demo-kit:** https://github.com/n8watkins/demo-kit, local clone `~/projects/demo-kit`.
+Every new or re-recorded clip is a storyboard file in `demo-kit/storyboards/<product>.ts`, recorded and rendered with its CLI; its README has the API, the commands and troubleshooting.
+The older scripts in n8builds-web (`scripts/product-clips/`, `scripts/scribe-tour/`) made the 2026-11-09 clips and are not used for new ones.
+
+```bash
+cd ~/projects/demo-kit
+demo-kit record storyboards/<product>.ts --expect <repo>@origin/<default>   # pre-flight, then the take
+demo-kit plan takes/<take> --strict                                         # camera plan; fix the storyboard until the desktop plan has no warnings
+demo-kit render takes/<take>                                                # desktop 1280x800 + phone 390x760: .mp4, .webm, -poster.webp
+demo-kit usage note <take> --tokens "<subagent totals>"                     # see "Usage" below
+```
 
 ## The decision: our own small module, rendered with Remotion
 
@@ -29,11 +40,11 @@ So the pipeline is:
 2. **Log** every cursor sample, press and focus target with a timestamp on the same clock as the frames (`events.json`).
 3. **Plan** the camera: a pure function turns the log into a camera path (`camera.json`) following the rules below, with unit tests for the rules.
 4. **Render** with Remotion: the take, transformed by the camera path, with the cursor and click ripples drawn on top at a constant on-screen size; one composition at 1280x800 and one phone cut at 390x760.
-5. **Encode** with the existing `encode.sh` steps (looping seam, VP9 WebM, H.264 MP4, WebP poster).
+5. **Encode** the looping seam, VP9 WebM, H.264 MP4 and WebP poster (demo-kit's `src/render/encode.ts`, ported from `encode.sh`).
 
 ### Module spec
 
-The module lives with the clips it makes, in n8builds-web `scripts/product-clips/`, and every recorder imports it.
+Built as demo-kit (above); this was the spec it was built from, and its names map onto demo-kit's API (`take.glide`, `take.press`, `take.select`, `take.focus`, `take.cut`, `planCamera`, the Remotion `Clip`).
 
 - `driver.mjs`, the recording side:
   - `startTake(page)` starts `page.screencast.start({ onFrame, size: { width: 2560, height: 1600 } })` (or CDP `Page.startScreencast` on older Playwright) and keeps each frame with its timestamp in epoch milliseconds.
@@ -52,7 +63,7 @@ Do every item before the first take, and again before a re-take on another day.
 
 1. **Latest build.** In the product repo: `git fetch`, be on the default branch, 0 commits behind, clean tree.
    If the extension loads from a build folder (`dist/`), rebuild it now; a build folder is never trusted as current.
-2. **Assert the build inside the take script**, so a stale build fails the run instead of making a clip:
+2. **Assert the build inside the take script**, so a stale build fails the run instead of making a clip (demo-kit's pre-flight does all of this: `--expect <repo>@<ref>`, or `extension.expect` in the storyboard, with `forbid` for old names):
    - read `chrome.runtime.getManifest()` from the service worker and compare `name`, `version` and `action.default_title` with `git show origin/<default>:<path>/manifest.json`;
    - fetch the action icon from `chrome-extension://<id>/<icon path>` and compare its hash with the icon on the default branch;
    - grep the loaded folder for the product's old names (for example the pre-rebrand names) and fail on a hit.
@@ -90,6 +101,11 @@ Do every item before the first take, and again before a re-take on another day.
 - **Follow the cursor softly.** Inside a focus, the camera only pans when the cursor leaves the middle 60% of the frame, and it lags the cursor by about 150 ms.
 - **Pull back at the end** to the opening framing, so the loop seam crossfades between two matching wide shots.
 - **Subpixel only.** No `zoompan` for finals; the renderer must place the window with fractional pixels so slow moves do not shake.
+- **Whole lines when they read.** When a whole text block fits at a smaller zoom that still makes its text 14 px on the display, use that zoom instead of 2.0x, so no line is cut at the frame's edge (an 18 px, 680 px column on a 640 px card: 1.76x).
+- **Edges between lines.** Nudge each framing up or down (up to 15% of its height) so the frame's top and bottom edges fall between text lines, never through a heading, and no sliver of a line sits in a corner.
+- **A control is held through its press**, at least 1.0 s; an emphasised press goes to 2.5x (the top of the reading range) and settles back after.
+- **Never chase a resting cursor.** Follow only a moving cursor or a tracked element; pan only along the axis the subject left, and skip nudges under about 30 px.
+- **The phone cut fills the portrait frame** (no bars) and keeps text at 14 px on a 390 px screen, so it is a crop of the desktop take; it follows the cursor even at its base zoom, because its window shows only a third of the page.
 
 ## Cursor rules
 
@@ -98,7 +114,7 @@ Do every item before the first take, and again before a re-take on another day.
 - **Smooth, calm movement:** ease-in-out, a slight arc, duration by distance (`clamp(350 + 0.6 * px, 400, 1100)` ms), no overshoot or jitter.
 - **Click indication:** a 200 ms dwell, a press (arrow scales to 0.88 for 120 ms), and a ripple ring from 8 px to 36 px radius over 450 ms in the product's accent colour at about 40% opacity, centred on the tip.
 - **Real input underneath:** the overlay is only a picture; every click, drag and hover is a real Playwright mouse event along the same path, so hover states and selection highlights are genuine.
-- **Rest out of the way:** after an action, drift the cursor a little aside (never over text being read or the result).
+- **Rest out of the way, in the shot:** after an action, drift the cursor a little aside (never over text being read or the result), to a point the next framing still shows (`take.rest({ beside: target })`); `demo-kit plan` warns when the cursor is out of frame.
 
 ## Storyboard template
 
@@ -133,6 +149,23 @@ Watch the clip at its real display size, then frame by frame at full size.
 - Sizes: each file under about 1.5 MB; silent (no audio track).
 - The take, `events.json` and `camera.json` are kept with the run notes, so a re-render does not need a re-take.
 
+## Usage: what each clip cost
+
+demo-kit appends every `record` and `render` to `usage.jsonl` (wall time, frames, clip length, sizes); `demo-kit usage` prints the table.
+AI tokens are not visible to the CLI, so the orchestrating agent adds them: when a recording subagent finishes, take the totals from its completion (tokens, tool uses, duration) and run `demo-kit usage note <take> --tokens "<totals>"`; when you recorded the take yourself, note what you can see, or "not visible".
+Commit `usage.jsonl` with the clip's pull request in demo-kit.
+This is to know what a clip costs, not to optimise it.
+
+## Lessons
+
+- **2026-11-09, building demo-kit on its test page.**
+  The screencast is 2560x1600 only with both `deviceScaleFactor: 2` and `--force-device-scale-factor=2`; with one alone the frames are 1280 wide or the page reports devicePixelRatio 1.
+  Headless extension loading needs Playwright's full Chromium (`channel: 'chromium'`), not the headless shell.
+  A per-word hold must not override a storyboard's explicit hold, and a shot's own press must win over the previous hold, or the camera reaches a button after it was pressed.
+  Fitting text at exactly 2.0x cut every line of a 680 px column; the whole-line rule fixed it.
+  The opening framing sliced the page header and the h1 at the top edge; edge snapping fixed it.
+  `locator.boundingBox()` waits up to 30 s for a missing element, which stalled tracking a word after the reading ended; poll with a short timeout.
+
 ## Mistakes we made (2026-11-09), not to repeat
 
 - **Outdated build recorded:** the old icon and old naming showed.
@@ -147,6 +180,8 @@ Watch the clip at its real display size, then frame by frame at full size.
 - **Shaky pans:** ffmpeg `zoompan` rounds to whole pixels, so slow pans and zooms jitter.
 
 ## Sources
+
+- demo-kit: https://github.com/n8watkins/demo-kit
 
 - Playwright `Screencast` API (`start`, `showActions` with `cursor` and `style`): https://playwright.dev/docs/api/class-screencast
 - playwright-recast cursor and click effects: https://thepatriczek.github.io/playwright-recast/docs/guides/click-effects-and-cursor

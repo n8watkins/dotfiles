@@ -26,6 +26,8 @@ Only the description sits in an agent's context every session; the steps load wh
 | `merge-and-cleanup` | Squash-merging PRs (release notes, parallel PRs, stacked PRs) and cleaning up afterwards. |
 | `windows-testing` | Hands-on tests on the live Windows PC without disrupting the owner. |
 | `writing` | Drafting anything published in my name; includes a draft `VOICE.md`. |
+| `app-quality-bar` | Building, redesigning or reviewing the UI/UX of one of my web apps. |
+| `demo-recording` | Recording or reviewing an automated product demo clip of an extension or web app. |
 
 ## Rules for this repo
 

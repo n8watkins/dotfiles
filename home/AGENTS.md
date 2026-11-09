@@ -1,4 +1,5 @@
 - Commit after every change: once a logical change/task is complete and verified, stage and commit it (don't let edits pile up uncommitted). Push when the user asks. Use clear messages.
+- Work on a branch and land it through a pull request, in every repo (private ones too) and for small fixes; never commit straight to the default branch. Private repos on the free plan have no branch protection, so this rule is the only guard.
 - When writing commit messages, NEVER auto-add your agent name as co-author.
 - Never use the em dash "—". Use plain dash "-" instead.
 - Never manually modify CHANGELOG.md files or any files that are marked as auto-generated.

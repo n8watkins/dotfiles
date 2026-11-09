@@ -21,7 +21,12 @@
       "Bash(gh secret remove:*)",
       "Bash(gh auth refresh:*)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
+      "Bash(git push -f:*)",
+      "Bash(pass-env run *)",
+      "Bash(pass-env pipe *)",
+      "Bash(pass-env generate * --force*)",
+      "Bash(pass-env import * --remove*)",
+      "Bash(pass-env scrub *--fix*)"
     ],
     "deny": [
       "Read(**/.env)",
@@ -33,7 +38,25 @@
       "Read(**/.dev.vars)",
       "Read(**/.dev.vars.*)",
       "Read(~/.password-store/**)",
-      "Read(~/.feelium-deploy.env)"
+      "Read(~/.feelium-deploy.env)",
+      "Read(~/.gnupg/**)",
+      "Bash(pass)",
+      "Bash(pass *)",
+      "Bash(gpg -d *)",
+      "Bash(gpg --decrypt *)",
+      "Bash(pass-env copy *)",
+      "Bash(pass-env run *-- env*)",
+      "Bash(pass-env run *-- printenv*)",
+      "Bash(pass-env run *-- echo *)",
+      "Bash(pass-env run *-- printf *)",
+      "Bash(pass-env run *-- sh *)",
+      "Bash(pass-env run *-- bash *)",
+      "Bash(pass-env run *-- zsh *)",
+      "Bash(pass-env run *-- node -e*)",
+      "Bash(pass-env run *-- node -p*)",
+      "Bash(pass-env run *-- python* -c*)",
+      "Bash(pass-env pipe *-- cat*)",
+      "Bash(pass-env pipe *-- tee*)"
     ]
   },
   "hooks": {

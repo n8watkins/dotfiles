@@ -21,6 +21,8 @@
 - Screenshots are at: `/mnt/c/Users/natha/OneDrive/Pictures/Screenshots`
 - Downloads are at: `/mnt/c/Users/natha/Downloads`
 - When the user shares a screenshot or says "check my screenshot", read the most recent file from the Screenshots path above
+- Secrets live in `pass`, used only through `pass-env`; you know them by name (`shared/GEMINI_API_KEY`), never by value. Never open `.env*`, `.dev.vars`, `~/.password-store` or `~/.gnupg`, never print secret variables, never ask the owner to paste a key into chat, and never work around a denied command.
+- Each project lists its secrets by name in `.env.pass`. Run with `pass-env run -- <command>`, send one key with `pass-env pipe <entry> -- <command reading stdin>`, check with `pass-env check`; run and pipe ask the owner each time. Create keys we control with `pass-env generate <entry>`; for provider-issued keys ask the owner to run `! pass-env set <entry>`. If you see LOCKED, ask the owner to run `! pass-env unlock`.
 
 ## Maintaining this file
 

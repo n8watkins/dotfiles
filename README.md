@@ -88,13 +88,18 @@ Claude Code runs both PreToolUse hooks at the same time, so they do not add up.
 It covers what makes an agent run or trust something: Claude Code and Codex hooks, permissions, env, status line, MCP servers, plugins, skills, `CLAUDE.md`/`AGENTS.md`, Codex rules, the dcg config, and a repo's own `.claude/settings*.json`, `.mcp.json`, `.vscode/tasks.json` and `.codex/config.toml`.
 
 - At every session start (Claude Code and Codex), it compares them with the approved snapshot and shows me and the agent what changed.
-- A change that matches this repo's `main` branch came through a PR, so it is approved on its own.
+- A change that matches this repo's `main` branch came through a PR, so it is approved on its own, unless it is safety-critical (below).
+- Safety-critical config always waits for `! agent-lock approve`, even when it matches `main`, because agents can merge PRs here and could otherwise approve their own rule change.
+  It covers: the `hooks`, `permissions`, `disableAllHooks` and `sandbox` keys of `~/.claude/settings.json` (and `settings.local.json`), the hook scripts in `~/.claude/hooks/` and `~/.config/agent-hooks/`, the dcg config, allowlist and rule packs, `AGENTS.md`/`CLAUDE.md`, `~/.codex/rules/*`, the Codex hooks in `config.toml`, and `agent-lock` itself (`~/.local/bin/agent-lock`, which holds the list).
+  `agent-lock check` and the session-start message mark each one `(safety-critical)`, add `matches dotfiles main` when it came through a PR, and list them first.
+  Skills, plugins, MCP servers, the status line and the other settings keys keep the `main` auto-approval.
+- The snapshot keeps the safety-critical list as last approved, and checks use it together with the script's own list: a changed list shows as `agent-lock:safety-list` with what was added or removed, and an entry taken out of the script still counts until the owner approves.
 - During a Claude Code session, the `ConfigChange` hook keeps an unapproved new hook, env var, plugin or skill from taking effect until the next session, where it is reported. Claude Code shows no message for that, so the next session start is where you hear about it. Permission changes go through, since I make those from the prompt.
 - After a change you meant to make outside a PR, approve the current state: `! agent-lock approve` (in a repo, this also approves that repo's agent config).
 - `agent-lock check` lists what is not approved yet.
 
 The snapshot in `~/.local/state/agent-lock/` holds fingerprints and names only, never env values or MCP settings.
-dcg blocks agents from running `agent-lock approve`; an agent that edits the snapshot file directly is not stopped, so this is a tripwire, not a lock.
+dcg blocks agents from running `agent-lock approve`; an agent that edits the snapshot file directly is not stopped, and a merged rewrite of `agent-lock` that hides its own change would only be caught in PR review, so this is a tripwire, not a lock.
 Tests: `bin/agent-lock.test.sh`.
 
 ## Install cooldown

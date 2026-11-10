@@ -6,11 +6,14 @@
 # Asks for: gh repo delete/archive, gh secret set/delete/remove, gh auth refresh
 # (changes the login's permissions), gh api DELETE calls, plain force pushes
 # (-f/--force/+refspec), --force-with-lease pushes to main or master, and
-# pass-env run/pipe to anything outside SAFE_SECRET_USES.
+# pass-env run/pipe to anything but the known deploy and test tools (see
+# SAFE_SECRET_USES: inline code, script paths, interpreters and custom configs ask).
 #
 # Does not ask for (owner, 2026-11-09):
 # - text that only mentions those commands (commit messages, PR bodies, heredocs,
-#   quoted strings, scripts): only commands that actually run are checked;
+#   quoted strings, scripts): only commands that actually run are checked; the
+#   command is read like bash reads it, so quoted text may span lines and a
+#   trailing backslash continues the command;
 # - --force-with-lease to a feature branch (routine after a rebase);
 # - deleting a branch through the API (gh api -X DELETE .../git/refs/heads/...),
 #   same as `git push origin --delete` (owner, 2026-11-02).
@@ -20,7 +23,7 @@
 # Tests: home/.claude/hooks/confirm-destructive-git.test.sh
 input=$(cat)
 exec python3 -I -c '
-import json, os, re, shlex, subprocess, sys
+import json, os, re, subprocess, sys
 
 data = json.loads(sys.argv[1] or "{}")
 cmd = (data.get("tool_input") or {}).get("command") or ""
@@ -52,24 +55,87 @@ def strip_heredocs(text):
                 out.append(body)
     return "\n".join(out)
 
+REDIRECT = re.compile(r"&>>?|<<<|<<-?|<>|>>|>&|<&|>\||<|>")
+
 def simple_commands(text):
-    tokens, cur = [], []
-    # Newlines separate commands too: split per line first.
-    for line in text.split("\n"):
-        lx = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
-        lx.whitespace_split = True
-        lx.commenters = "#"
-        for tok in lx:
-            if tok and set(tok) <= set(";&|()<>"):
-                if cur:
-                    tokens.append(cur)
-                cur = []
+    """Split text into simple commands (lists of words) the way bash reads it.
+
+    Quoted text stays one word even across newlines, a backslash-newline joins
+    lines, and only unquoted newlines and ; & | ( ) end a command. Redirections
+    and their targets (2>&1, > file, <<EOF) are dropped. Raises ValueError on
+    an unclosed quote.
+    """
+    cmds, words, cur, skip, i, n = [], [], None, False, 0, len(text)
+
+    def flush():
+        nonlocal cur, skip
+        if cur is not None:
+            if skip:
+                skip = False
             else:
-                cur.append(tok)
-        if cur:
-            tokens.append(cur)
-        cur = []
-    return tokens
+                words.append(cur)
+        cur = None
+
+    def end_command():
+        nonlocal words, skip
+        flush()
+        if words:
+            cmds.append(words)
+        words, skip = [], False
+
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            if text[i + 1:i + 2] != "\n":
+                cur = (cur or "") + text[i + 1:i + 2]
+            i += 2
+        elif c == "\x27":
+            j = text.find("\x27", i + 1)
+            if j < 0:
+                raise ValueError("unclosed single quote")
+            cur = (cur or "") + text[i + 1:j]
+            i = j + 1
+        elif c == "\"":
+            buf, i = "", i + 1
+            while True:
+                if i >= n:
+                    raise ValueError("unclosed double quote")
+                d = text[i]
+                if d == "\"":
+                    i += 1
+                    break
+                if d == "\\" and text[i + 1:i + 2] in ("$", "`", "\"", "\\", "\n"):
+                    if text[i + 1] != "\n":
+                        buf += text[i + 1]
+                    i += 2
+                    continue
+                buf += d
+                i += 1
+            cur = (cur or "") + buf
+        elif c == "#" and cur is None:
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif c in " \t\r":
+            flush()
+            i += 1
+        elif c in "<>" or text.startswith("&>", i):
+            if c in "<>" and cur is not None and cur.isdigit():
+                cur = None  # file descriptor, as in 2>&1
+            flush()
+            if c in "<>" and text[i + 1:i + 2] == "(":
+                end_command()  # process substitution: its body is a command
+                i += 1
+                continue
+            i = REDIRECT.match(text, i).end()
+            skip = True  # the next word is the redirect target, not an argument
+        elif c in "\n;&|()":
+            end_command()
+            i += 1
+        else:
+            cur = (cur or "") + c
+            i += 1
+    end_command()
+    return cmds
 
 def unwrap(argv):
     while argv:
@@ -142,30 +208,146 @@ def check_push(args, here):
         return "force-pushes to main or master"
     return None
 
-# pass-env run/pipe pass a secret without asking only to these (owner, 2026-11-09).
-# Printing forms are blocked by deny rules in settings.json either way.
+# pass-env run/pipe pass a secret without asking only to the known deploy and
+# test tools below, run the way the project defines them (owner, 2026-11-09 and
+# 2026-11-10). Anything that could run code the command line itself supplies
+# asks: inline code (node -e, python -c, npx -c), a script path, an interpreter,
+# a custom config, or an environment variable that injects code (NODE_OPTIONS,
+# PATH, ...). Printing forms are also blocked by deny rules in settings.json.
 SAFE_SECRET_USES = [
     ["wrangler", "deploy"], ["wrangler", "secret", "put"], ["wrangler", "secret", "bulk"],
     ["wrangler", "d1", "migrations"], ["wrangler", "deployments"], ["wrangler", "versions"],
     ["wrangler", "dev"], ["wrangler", "types"],
     ["opennextjs-cloudflare"], ["vercel", "env", "add"], ["vercel", "deploy"], ["vercel", "--prod"],
-    ["npm", "run"], ["npm", "test"], ["npm", "start"], ["npm", "ci"],
-    ["pnpm", "run"], ["pnpm", "test"], ["pnpm", "dev"], ["pnpm", "build"], ["pnpm", "start"],
     ["next", "dev"], ["next", "build"], ["next", "start"],
-    ["playwright", "test"], ["vitest"], ["uv", "run"],
+    ["playwright", "test"], ["vitest"],
 ]
+# Flags of those tools that load code or config from a path.
+CODE_FLAGS = {"-c", "--config", "-r", "--root", "--dir", "--setupFiles", "--globalSetup",
+              "--globalTeardown", "--require", "--import", "--loader", "--environment",
+              "--pool", "--node-options"}
+# Scoped npx packages that install one of the tools above.
+SCOPED_TOOLS = {"@opennextjs/cloudflare": "opennextjs-cloudflare", "@playwright/test": "playwright"}
+# Wrapper flags that only change prompting or output (npx, pnpm exec/dlx, npm exec).
+WRAPPER_FLAGS = {"-y", "--yes", "--no", "--no-install", "-q", "--quiet", "--silent"}
+# Flags before a package.json script name (npm run, pnpm run); values are names.
+SCRIPT_FLAGS = {"-s", "--silent", "--if-present", "-r", "--recursive", "--parallel", "--stream"}
+SCRIPT_VALUE_FLAGS = {"-w", "--workspace", "--filter", "-F", "-C", "--dir"}
+# uv run flags: project options only (no --with, --script, -m or --python).
+UV_FLAGS = {"--frozen", "--locked", "--no-sync", "--all-extras", "--no-dev", "--offline", "-q", "--quiet"}
+UV_VALUE_FLAGS = {"--extra", "--group", "--package", "--env-file"}
+SCRIPT_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.-]*$")
+INTERPRETER = re.compile(r"^(python[0-9.]*|pypy[0-9.]*|ipython|pip[0-9.]*|node|nodejs|bun|deno|"
+                         r"perl|ruby|php|sh|bash|zsh|dash|env|xargs|uv|uvx|tsx|ts-node)$")
+# Environment variables that make a launcher load other code.
+RISKY_ENV = re.compile(r"^(NODE_OPTIONS|NODE_PATH|PATH|PYTHON[A-Z_]*|LD_[A-Z_]+|DYLD_[A-Z_]+|"
+                       r"BASH_ENV|ENV|PERL5[A-Z_]*|RUBYOPT|RUBYLIB|npm_config_[a-z_]+|NPM_CONFIG_[A-Z_]+)=")
+ASSIGNERS = {"env", "export", "declare", "typeset", "readonly", "local", "sudo"}
+risky_env = False
+
+def sets_risky_env(argv):
+    """True if argv assigns a RISKY_ENV variable: VAR=x cmd, env VAR=x cmd, export VAR=x."""
+    assigning = True
+    for a in argv:
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
+            if assigning and RISKY_ENV.match(a):
+                return True
+        elif os.path.basename(a) in ASSIGNERS:
+            assigning = True
+        elif not (assigning and a.startswith("-")):
+            assigning = False
+    return False
+
+def flag_name(a):
+    return a.split("=", 1)[0]
+
+def script_run_ok(a):
+    """a = args after `npm run` / `pnpm run`: flags, then a package.json script name."""
+    while a and a[0].startswith("-"):
+        f = flag_name(a[0])
+        if f in SCRIPT_FLAGS and "=" not in a[0]:
+            a = a[1:]
+        elif f in SCRIPT_VALUE_FLAGS:
+            a = a[1:] if "=" in a[0] else a[2:]
+        else:
+            return False
+    return bool(a) and bool(SCRIPT_NAME.match(a[0]))
+
+def no_extra_npm_flags(a):
+    """npm reads flags before `--` itself (--node-options, --script-shell)."""
+    for x in a:
+        if x == "--":
+            return True
+        if x.startswith("-") and flag_name(x) not in SCRIPT_FLAGS:
+            return False
+    return True
 
 def safe_secret_use(argv):
     a = list(argv)
-    # npx / pnpm exec / pnpm dlx wrappers, with their flags and a pinned version.
+    # npx / bunx / pnpm exec / pnpm dlx / npm exec, with harmless flags only.
     while a and (os.path.basename(a[0]) in ("npx", "bunx") or a[:2] in (["pnpm", "exec"], ["pnpm", "dlx"], ["npm", "exec"])):
         a = a[2:] if a[0] in ("pnpm", "npm") else a[1:]
         while a and a[0].startswith("-"):
+            if a[0] not in WRAPPER_FLAGS:
+                return False
             a = a[1:]
     if not a:
         return False
-    a[0] = re.sub(r"@[^/]*$", "", os.path.basename(a[0]))
-    return any(a[:len(p)] == p for p in SAFE_SECRET_USES)
+    tool = re.sub(r"(?<=.)@[^/]*$", "", a[0])  # pinned version: wrangler@4.1.0
+    if tool.startswith("@"):
+        tool = SCOPED_TOOLS.get(tool)
+        if not tool:
+            return False
+    elif "/" in tool:
+        if not re.match(r"^(\./)?node_modules/\.bin/[^/]+$", tool):
+            return False  # a script or a binary outside the project
+        tool = os.path.basename(tool)
+    a = [tool] + a[1:]
+    if tool == "npm":
+        if len(a) >= 2 and a[1] in ("run", "run-script"):
+            return script_run_ok(a[2:]) and no_extra_npm_flags(a[2:])
+        return len(a) >= 2 and a[1] in ("test", "t", "start", "ci") and no_extra_npm_flags(a[2:])
+    if tool == "pnpm":
+        if len(a) >= 2 and a[1] == "run":
+            return script_run_ok(a[2:])
+        return len(a) >= 2 and a[1] in ("test", "dev", "build", "start")
+    if tool == "uv":
+        if a[1:2] != ["run"]:
+            return False
+        a = a[2:]
+        while a and a[0].startswith("-"):
+            f = flag_name(a[0])
+            if f in UV_FLAGS and "=" not in a[0]:
+                a = a[1:]
+            elif f in UV_VALUE_FLAGS:
+                a = a[1:] if "=" in a[0] else a[2:]
+            else:
+                return False
+        # A named project command (pytest, alembic), not an interpreter or a file.
+        return bool(a) and bool(SCRIPT_NAME.match(a[0])) and not INTERPRETER.match(a[0]) \
+            and not re.search(r"\.(py|pyw|sh)$", a[0])
+    if not any(a[:len(p)] == p for p in SAFE_SECRET_USES):
+        return False
+    for i, x in enumerate(a[1:], 1):
+        f = flag_name(x)
+        if f == "--reporter":
+            # Built-in reporters (list, html, verbose) are fine; a path is code.
+            value = x.split("=", 1)[1] if "=" in x else (a[i + 1] if i + 1 < len(a) else "")
+            if "/" in value or "." in value:
+                return False
+        elif f in CODE_FLAGS:
+            return False
+    if tool == "next":
+        # next dev <dir> would run another project; allow only port and host values.
+        rest, i = a[2:], 0
+        while i < len(rest):
+            if rest[i] in ("-p", "--port", "-H", "--hostname"):
+                i += 2
+            elif rest[i].startswith("-"):
+                i += 1
+            else:
+                return False
+    return True
 
 def check(argv, here):
     argv = unwrap(argv)
@@ -186,6 +368,8 @@ def check(argv, here):
             reason = check(inner, here)
             if reason:
                 return reason
+        if risky_env or sets_risky_env(argv) or sets_risky_env(inner):
+            return "gives a secret to a command with an environment variable that can load other code"
         if piped_secret or safe_secret_use(inner_u):
             return None
         return "gives a secret to a command that is not on the safe list"
@@ -219,7 +403,11 @@ def check(argv, here):
     return None
 
 def scan(text, here):
-    for argv in simple_commands(strip_heredocs(text)):
+    global risky_env
+    cmds = simple_commands(strip_heredocs(text))
+    # export NODE_OPTIONS=... earlier in the same command line counts too.
+    risky_env = risky_env or any(sets_risky_env(argv) for argv in cmds)
+    for argv in cmds:
         a = unwrap(argv)
         if a and a[0] == "cd":
             if len(a) > 1:

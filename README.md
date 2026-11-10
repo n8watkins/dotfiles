@@ -9,7 +9,7 @@ How my coding agents (Claude Code and Codex) are set up: the rules every session
 | `home/AGENTS.md` | The short rules every agent reads at the start of every session. | `~/AGENTS.md`, linked as `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` |
 | `skills/` | Playbooks: step-by-step procedures an agent loads only when the situation comes up. | `~/.agents/skills/`, linked into `~/.claude/skills/` and `~/.codex/skills/` |
 | `home/.claude/settings.json` | Claude Code settings: permission prompts, hooks, status line. | Copied to `~/.claude/settings.json` |
-| `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes and force pushes. | `~/.claude/hooks/` |
+| `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). Tests: `confirm-destructive-git.test.sh`. | `~/.claude/hooks/` |
 | `bin/` | `trash` (move instead of delete) and `agent-lock` (the config lock). | `~/.local/bin/` |
 | `home/.config/dcg/` | Destructive command guard settings, exceptions and the `n8` rule pack for my databases and hosts. | `~/.config/dcg/` |
 | `home/.codex/config.hooks.toml` | The dcg hook for Codex. | A marked block inside `~/.codex/config.toml` |
@@ -52,7 +52,7 @@ It blocks rather than asks, also in bypass mode, and tells the agent to stop and
 | `home/.config/dcg/allowlist.toml` | Exceptions: `git branch -D`, `rm -rf` of build folders (`node_modules`, `dist`, `.next` and similar), branch deletes through the API, cancelling a CI run, and the GitHub deletes that `confirm-destructive-git.sh` and the `ask` rules already confirm with me. |
 | `home/.config/dcg/packs/n8.test.sh` | Tests through the same hook payload Claude Code sends, in bypass mode. CI runs them. |
 
-`confirm-destructive-git.sh` keeps doing its job next to dcg: it asks about GitHub deletes, secrets, login permissions and force pushes.
+`confirm-destructive-git.sh` keeps doing its job next to dcg: it asks about GitHub deletes, Actions secrets, login permissions, force pushes, and secrets handed to commands outside the known deploy and test tools.
 When both answer, the stricter answer wins.
 
 To override a block (owner only):

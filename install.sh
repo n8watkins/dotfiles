@@ -39,6 +39,19 @@ block home/.config/pnpm/config.yaml "$HOME/.config/pnpm/config.yaml"
 
 # Hooks.
 link home/.claude/hooks/confirm-destructive-git.sh "$HOME/.claude/hooks/confirm-destructive-git.sh"
+# Codex keeps hooks in config.toml next to settings it rewrites itself, so this
+# repo owns only a marked block in it.
+block home/.codex/config.hooks.toml "$HOME/.codex/config.toml"
+
+# Destructive command guard (dcg): settings, exceptions and the n8 rule pack.
+link home/.config/dcg/config.toml "$HOME/.config/dcg/config.toml"
+link home/.config/dcg/allowlist.toml "$HOME/.config/dcg/allowlist.toml"
+for f in "$repo"/home/.config/dcg/packs/*.yaml; do
+  link "home/.config/dcg/packs/$(basename "$f")" "$HOME/.config/dcg/packs/$(basename "$f")"
+done
+if [ ! -x "$HOME/.local/bin/dcg" ]; then
+  echo "dcg is not installed: the guard hooks fail open until it is (see README, Destructive command guard)"
+fi
 for f in "$repo"/bin/*; do
   link "bin/$(basename "$f")" "$HOME/.local/bin/$(basename "$f")"
 done

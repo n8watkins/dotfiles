@@ -1,0 +1,97 @@
+# dcg rule pack for this setup: the databases and hosts my projects use
+# (Turso/libSQL, Cloudflare D1, Drizzle, Prisma, Vercel) where dcg's own packs
+# have no rules, plus a block on an agent lifting dcg's blocks itself.
+# Every rule is critical, so it always denies (also in bypass mode) and only a
+# per-rule override in config.toml can relax it.
+# Tests: home/.config/dcg/packs/n8.test.sh
+schema_version: 1
+id: n8.stack
+name: n8 stack (Turso, D1, Drizzle, Prisma, Vercel)
+version: 1.0.0
+description: Deletes and resets for the databases and hosts used in n8watkins projects.
+
+keywords:
+  - wrangler
+  - turso
+  - drizzle-kit
+  - prisma
+  - vercel
+  - dcg
+
+denial_banner: Blocked - this needs the owner's OK
+denial_trailer: >-
+  Stop and ask the owner (Nathan) before going further. Say what you wanted to
+  run and why, and let him run it himself or approve it. Do not retry it in
+  another form, through a script, or through dcg allow-once/allowlist.
+
+destructive_patterns:
+  # Cloudflare D1. dcg's SQL packs catch DROP and TRUNCATE in the text; these
+  # also catch DELETE (with or without WHERE) and SQL the guard cannot see.
+  - name: d1-execute-destructive-sql
+    pattern: '(?i)\bwrangler\b(?![^;&|\n]*--local\b)[^;&|\n]*\bd1\s+execute\b(?![^;&|\n]*--local\b)[^;&|\n]*\b(?:drop|delete|truncate)\b'
+    severity: critical
+    description: wrangler d1 execute with DROP, DELETE or TRUNCATE deletes data in a D1 database
+    explanation: Run it with --local against the local copy, or ask the owner. For the live database, export a backup first (wrangler d1 export --remote).
+  - name: d1-execute-remote-file
+    pattern: '\bwrangler\b[^;&|\n]*\bd1\s+execute\b(?=[^;&|\n]*--remote\b)(?=[^;&|\n]*--file\b)'
+    severity: critical
+    description: wrangler d1 execute --remote --file runs SQL the guard cannot read against the live database
+    explanation: Show the owner the SQL file and let him run it, or run it with --local first.
+  - name: d1-time-travel-restore
+    pattern: '\bwrangler\b[^;&|\n]*\bd1\s+time-travel\s+restore\b'
+    severity: critical
+    description: wrangler d1 time-travel restore overwrites the live database with an older copy
+    explanation: Restoring replaces every change made since that time. Only the owner decides when to roll back.
+
+  # Turso / libSQL.
+  - name: turso-shell-destructive-sql
+    pattern: '(?i)\bturso\s+db\s+shell\b[^;&|\n]*\b(?:drop|delete|truncate)\b'
+    severity: critical
+    description: turso db shell with DROP, DELETE or TRUNCATE deletes data in a Turso database
+    explanation: Turso databases are live data. Show the owner the SQL and let him run it, after a backup (turso db shell <db> .dump).
+  - name: turso-shell-from-file
+    pattern: '\bturso\s+db\s+shell\b[^|;&]*<(?!<)'
+    severity: critical
+    description: turso db shell reading SQL from a file runs SQL the guard cannot read against the live database
+    explanation: Show the owner the SQL file and let him run it.
+  - name: turso-destroy
+    pattern: '\bturso\s+(?:db|group|org)\s+destroy\b'
+    severity: critical
+    description: turso destroy deletes a database, group or organization
+    explanation: Deleting a Turso database or group cannot be undone from here. Only the owner deletes databases.
+
+  # Drizzle and Prisma.
+  - name: drizzle-kit-push-drop
+    pattern: '\bdrizzle-kit\s+(?:push|drop)\b'
+    severity: critical
+    description: drizzle-kit push or drop changes the database schema directly and can drop tables and columns
+    explanation: Use drizzle-kit generate and migrate so the change is a reviewed migration file, or ask the owner to run push himself.
+  - name: prisma-migrate-reset
+    pattern: '\bprisma\s+migrate\s+reset\b'
+    severity: critical
+    description: prisma migrate reset drops the database and every row in it
+    explanation: Use prisma migrate dev or deploy, or ask the owner to reset the database himself.
+  - name: prisma-db-push-data-loss
+    pattern: '\bprisma\s+db\s+push\b[^;&|\n]*--(?:force-reset|accept-data-loss)\b'
+    severity: critical
+    description: prisma db push --force-reset or --accept-data-loss deletes data
+    explanation: Run prisma db push without these flags to see the warning, then ask the owner.
+
+  # Vercel.
+  - name: vercel-remove
+    pattern: '\bvercel\s+(?:remove|rm)\b'
+    severity: critical
+    description: vercel remove deletes deployments or a whole project
+    explanation: Only the owner removes Vercel deployments or projects.
+  - name: vercel-project-remove
+    pattern: '\bvercel\s+(?:project|projects|env|domains|domain|dns|alias|aliases|blob)\s+(?:rm|remove|del|delete)\b'
+    severity: critical
+    description: removes a Vercel project, environment variable, domain, DNS record, alias or blob
+    explanation: Only the owner removes Vercel projects, settings or domains.
+
+  # dcg itself: only the owner lifts a block.
+  - name: dcg-self-bypass
+    pattern: '\bdcg\s+(?:allow-once|allow|allowlist\s+(?:add|add-command)|uninstall|install|update)\b'
+    severity: critical
+    description: Lifting, changing or removing dcg's blocks is the owner's call, not an agent's
+    explanation: The owner can approve a blocked command himself, for example with ! dcg allow-once <code> in the prompt.

@@ -13,10 +13,29 @@ link() { # link <repo path> <target>
   echo "linked $dst"
 }
 
+# block <repo path> <target>: keeps the repo file's lines inside a marked block
+# in the target and leaves everything else alone. Used for files that tools
+# also write to themselves (npm stores login tokens in ~/.npmrc), so the live
+# file must never be a link into this public repo.
+block() {
+  local src="$repo/$1" dst="$2" begin="# >>> dotfiles: $1 >>>" end="# <<< dotfiles: $1 <<<"
+  mkdir -p "$(dirname "$dst")"
+  touch "$dst"
+  local tmp; tmp="$(mktemp)"
+  awk -v b="$begin" -v e="$end" '$0==b{skip=1;next} $0==e{skip=0;next} !skip' "$dst" >"$tmp"
+  { cat "$tmp"; echo "$begin"; cat "$src"; echo "$end"; } >"$tmp.new"
+  if ! cmp -s "$tmp.new" "$dst"; then cat "$tmp.new" >"$dst"; echo "updated $dst"; fi
+  rm -f "$tmp" "$tmp.new"
+}
+
 # One rules file for every agent.
 link home/AGENTS.md "$HOME/AGENTS.md"
 link home/AGENTS.md "$HOME/.claude/CLAUDE.md"
 link home/AGENTS.md "$HOME/.codex/AGENTS.md"
+
+# Package install cooldown (npm and pnpm).
+block home/.npmrc "$HOME/.npmrc"
+block home/.config/pnpm/config.yaml "$HOME/.config/pnpm/config.yaml"
 
 # Hooks.
 link home/.claude/hooks/confirm-destructive-git.sh "$HOME/.claude/hooks/confirm-destructive-git.sh"

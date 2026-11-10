@@ -1,0 +1,4 @@
+# Install cooldown (pnpm 10.16+; the value is in minutes, 4320 = 3 days).
+# One-off override when you adopt a new version early:
+#   pnpm add -D typescript@7 --config.minimumReleaseAge=0
+minimumReleaseAge: 4320

@@ -53,6 +53,7 @@ if [ ! -x "$HOME/.local/bin/dcg" ]; then
   echo "dcg is not installed: the guard hooks fail open until it is (see README, Destructive command guard)"
 fi
 for f in "$repo"/bin/*; do
+  case "$f" in *.test.sh) continue ;; esac
   link "bin/$(basename "$f")" "$HOME/.local/bin/$(basename "$f")"
 done
 for f in "$repo"/home/.config/agent-hooks/*.sh; do

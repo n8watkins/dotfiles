@@ -1,0 +1,368 @@
+#!/usr/bin/env -S python3 -I
+"""agent-lock: notice when coding-agent config changes without the owner's OK.
+
+Covers what makes an agent run something or trust something: Claude Code and
+Codex hooks, permissions, MCP servers, plugins, skills, rules files
+(CLAUDE.md, AGENTS.md, Codex rules), the dcg guard's config, and per-repo agent
+config (.claude/settings*.json, .mcp.json, .vscode/tasks.json, .codex/config.toml).
+
+  agent-lock check            list changes since the approved snapshot (exit 1 if any)
+  agent-lock approve          approve the current state (the owner runs this)
+  agent-lock hook <event>     run as a hook: claude-session-start,
+                              codex-session-start, claude-config-change
+
+A change that matches the dotfiles repo's main branch (merged through a PR) is
+approved automatically. Everything else is reported until the owner runs
+`agent-lock approve`. The snapshot holds fingerprints and names, never values
+of env vars or MCP server settings.
+"""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+HOME = Path(os.environ.get("HOME", str(Path.home())))
+STATE = Path(os.environ.get("AGENT_LOCK_STATE", HOME / ".local/state/agent-lock"))
+SNAPSHOT = STATE / "approved.json"
+DOTFILES = Path(os.environ.get("AGENT_LOCK_DOTFILES", HOME / "projects/dotfiles"))
+
+# settings.json keys that make Claude Code run or trust something.
+CLAUDE_KEYS = [
+    "hooks", "permissions", "enabledPlugins", "extraKnownMarketplaces", "statusLine",
+    "env", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper",
+    "disableAllHooks", "enableAllProjectMcpServers", "enabledMcpjsonServers",
+    "disabledMcpjsonServers", "sandbox", "fileSuggestion", "forceLoginMethod",
+]
+CODEX_KEYS = ["hooks", "mcp_servers", "notify", "approval_policy", "sandbox_mode",
+              "sandbox_workspace_write", "shell_environment_policy", "profiles"]
+NO_SNAPSHOT = "no approved snapshot"
+PROJECT_FILES = [".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
+                 ".vscode/tasks.json", ".codex/config.toml"]
+
+
+def digest(value) -> str:
+    if isinstance(value, bytes):
+        data = value
+    else:
+        data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def read_json(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def file_print(path: Path):
+    """Fingerprint of a file, or of every file in a folder (following links)."""
+    if path.is_file():
+        try:
+            return digest(path.read_bytes())
+        except OSError:
+            return "unreadable"
+    if path.is_dir():
+        parts = []
+        for root, dirs, files in os.walk(path, followlinks=True):
+            dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules", "__pycache__"))
+            for name in sorted(files):
+                full = Path(root) / name
+                try:
+                    parts.append([str(full.relative_to(path)), digest(full.read_bytes())])
+                except OSError:
+                    parts.append([str(full.relative_to(path)), "unreadable"])
+        return digest(parts)
+    return None
+
+
+def names_only(servers) -> str:
+    """Readable summary of MCP servers: names and the command or URL, no env or headers."""
+    if not isinstance(servers, dict):
+        return ""
+    out = []
+    for name, cfg in sorted(servers.items()):
+        cfg = cfg if isinstance(cfg, dict) else {}
+        target = cfg.get("url") or " ".join([str(cfg.get("command", ""))] + [str(a) for a in cfg.get("args", [])][:3])
+        out.append(f"{name} ({target.strip()})")
+    return ", ".join(out)
+
+
+def collect(project: Path | None = None) -> dict:
+    """Current state: item name -> {"fp": fingerprint, "path": file it came from}."""
+    items: dict[str, dict] = {}
+
+    def add(name, value, path, show=""):
+        if value is None:
+            return
+        items[name] = {"fp": value if isinstance(value, str) else digest(value), "path": str(path)}
+        if show:
+            items[name]["show"] = show
+
+    for fname in ("settings.json", "settings.local.json"):
+        path = HOME / ".claude" / fname
+        data = read_json(path)
+        if isinstance(data, dict):
+            for key in CLAUDE_KEYS:
+                if key in data:
+                    add(f"claude/{fname}:{key}", data[key], path)
+
+    claude_json = read_json(HOME / ".claude.json")
+    if isinstance(claude_json, dict):
+        servers = claude_json.get("mcpServers")
+        if servers:
+            add("claude/.claude.json:mcpServers", servers, HOME / ".claude.json", names_only(servers))
+        for proj, cfg in sorted((claude_json.get("projects") or {}).items()):
+            if isinstance(cfg, dict) and cfg.get("mcpServers"):
+                add(f"claude/.claude.json:projects[{proj}].mcpServers", cfg["mcpServers"],
+                    HOME / ".claude.json", names_only(cfg["mcpServers"]))
+
+    plugins = read_json(HOME / ".claude/plugins/installed_plugins.json")
+    if isinstance(plugins, dict):
+        names = sorted((plugins.get("plugins") or plugins).keys())
+        add("claude/plugins/installed", names, HOME / ".claude/plugins/installed_plugins.json", ", ".join(names))
+
+    for folder in (HOME / ".claude/hooks", HOME / ".config/agent-hooks", HOME / ".codex/rules",
+                   HOME / ".config/dcg/packs"):
+        if folder.is_dir():
+            for f in sorted(folder.iterdir()):
+                if f.name.endswith(".pre-dotfiles"):
+                    continue
+                add(f"file:{tilde(f)}", file_print(f), f)
+    for f in (HOME / ".claude/CLAUDE.md", HOME / "AGENTS.md", HOME / ".codex/AGENTS.md",
+              HOME / ".config/dcg/config.toml", HOME / ".config/dcg/allowlist.toml"):
+        add(f"file:{tilde(f)}", file_print(f), f)
+
+    for folder in (HOME / ".claude/skills", HOME / ".codex/skills", HOME / ".agents/skills"):
+        if folder.is_dir():
+            for s in sorted(folder.iterdir()):
+                if not s.name.startswith(".") and not s.name.endswith(".pre-dotfiles"):
+                    add(f"skill:{tilde(s)}", file_print(s), s)
+
+    codex_path = HOME / ".codex/config.toml"
+    try:
+        codex = tomllib.loads(codex_path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        codex = None
+    if isinstance(codex, dict):
+        for key in CODEX_KEYS:
+            value = codex.get(key)
+            if key == "hooks" and isinstance(value, dict):
+                value = {k: v for k, v in value.items() if k != "state"}  # trust state is Codex's own
+            if value:
+                add(f"codex/config.toml:{key}", value, codex_path,
+                    names_only(value) if key == "mcp_servers" else "")
+
+    if project:
+        for rel in PROJECT_FILES:
+            path = project / rel
+            if path.is_file():
+                data = read_json(path) if path.suffix == ".json" else None
+                if rel.startswith(".claude/") and isinstance(data, dict):
+                    value = {k: data[k] for k in CLAUDE_KEYS if k in data}
+                else:
+                    value = file_print(path)
+                add(f"project:{project}/{rel}", value, path,
+                    names_only((data or {}).get("mcpServers")) if rel == ".mcp.json" else "")
+    return items
+
+
+def tilde(path: Path) -> str:
+    s = str(path)
+    return "~" + s[len(str(HOME)):] if s.startswith(str(HOME) + "/") else s
+
+
+def git(*args) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(DOTFILES), *args], capture_output=True, text=True, timeout=10)
+
+
+def from_dotfiles(name: str, item: dict) -> bool:
+    """True if this item's current state is exactly what dotfiles' main branch ships."""
+    if not (DOTFILES / ".git").exists():
+        return False
+    if name.startswith("claude/settings.json:"):
+        key = name.split(":", 1)[1]
+        shown = git("show", "origin/main:home/.claude/settings.json")
+        if shown.returncode:
+            return False
+        try:
+            data = json.loads(shown.stdout)
+        except ValueError:
+            return False
+        return key in data and digest(data[key]) == item["fp"]
+    if name.startswith(("file:", "skill:")):
+        target = Path(item["path"]).resolve()
+        try:
+            rel = target.relative_to(DOTFILES.resolve())
+        except ValueError:
+            return False
+        # The linked file or folder must be committed on main, unchanged and with nothing untracked.
+        same = git("diff", "--quiet", "origin/main", "--", str(rel)).returncode == 0
+        untracked = git("status", "--porcelain", "--", str(rel)).stdout.strip()
+        tracked = git("ls-tree", "--name-only", "origin/main", "--", str(rel)).stdout.strip()
+        return same and not untracked and bool(tracked)
+    return False
+
+
+def project_root(cwd: str | None) -> Path | None:
+    if not cwd:
+        return None
+    r = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+    root = Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+    if root and any((root / rel).is_file() for rel in PROJECT_FILES):
+        return root
+    return None
+
+
+def load() -> dict | None:
+    data = read_json(SNAPSHOT)
+    return data if isinstance(data, dict) and "items" in data else None
+
+
+def save(items: dict) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE, 0o700)
+    tmp = SNAPSHOT.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"version": 1, "items": items}, indent=1, sort_keys=True) + "\n")
+    os.chmod(tmp, 0o600)
+    tmp.replace(SNAPSHOT)
+
+
+def compare(project: Path | None, prefix: tuple[str, ...] = ()) -> tuple[list[str], int]:
+    """Changes not approved, as readable lines. Changes that match dotfiles main are approved on the way."""
+    snap = load()
+    current = collect(project)
+    if snap is None:
+        return [NO_SNAPSHOT], 0
+    approved = snap["items"]
+    scope = [n for n in set(current) | set(approved)
+             if (not n.startswith("project:") or (project and n.startswith(f"project:{project}/")))
+             and (not prefix or n.startswith(prefix))]
+    changes, blessed = [], 0
+    for name in sorted(scope):
+        now, before = current.get(name), approved.get(name)
+        if now and before and now["fp"] == before["fp"]:
+            continue
+        if now and from_dotfiles(name, now):
+            approved[name] = now
+            blessed += 1
+            continue
+        if now and not before:
+            what = "new"
+        elif before and not now:
+            if name.startswith("claude/settings.json:") and from_dotfiles_removed(name):
+                del approved[name]
+                blessed += 1
+                continue
+            what = "removed"
+        else:
+            what = "changed"
+        show = (now or before or {}).get("show")
+        changes.append(f"{what}: {name}" + (f" [{show}]" if show else ""))
+    if blessed:
+        save(approved)
+    return changes, blessed
+
+
+def from_dotfiles_removed(name: str) -> bool:
+    key = name.split(":", 1)[1]
+    shown = git("show", "origin/main:home/.claude/settings.json")
+    try:
+        return shown.returncode == 0 and key not in json.loads(shown.stdout)
+    except ValueError:
+        return False
+
+
+def message(changes: list[str]) -> tuple[str, str]:
+    if changes == [NO_SNAPSHOT]:
+        return ("agent-lock: no approved snapshot yet, so changes cannot be checked. Approve the current state with: ! agent-lock approve",
+                "agent-lock has no approved snapshot of the agent config yet. Tell the owner; do not run agent-lock approve yourself.")
+    listed = "\n".join(f"  - {c}" for c in changes[:20]) + (f"\n  - and {len(changes) - 20} more" if len(changes) > 20 else "")
+    user = (f"agent-lock: {len(changes)} agent config change(s) were not approved:\n{listed}\n"
+            "If you made them, approve with: ! agent-lock approve   (details: agent-lock check)")
+    agent = (f"agent-lock found {len(changes)} change(s) to agent config (hooks, permissions, MCP servers, "
+             f"plugins, skills or rules files) that the owner has not approved:\n{listed}\n"
+             "Tell the owner about this at the start of your next reply. Do not run agent-lock approve "
+             "yourself and do not edit ~/.local/state/agent-lock.")
+    return user, agent
+
+
+def hook(event: str) -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        payload = {}
+    cwd = payload.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+    if event in ("claude-session-start", "codex-session-start"):
+        changes, _ = compare(project_root(cwd))
+        if changes:
+            user, agent = message(changes)
+            print(json.dumps({"systemMessage": user, "hookSpecificOutput": {
+                "hookEventName": "SessionStart", "additionalContext": agent}}))
+        return 0
+    if event == "claude-config-change":
+        # Claude Code shows no message for this event, so an unapproved change
+        # that makes the agent run something is kept out of the running session.
+        # The next session start reports it. Permission changes are let through:
+        # the owner makes those from the prompt.
+        source = payload.get("source", "")
+        if source == "user_settings":
+            prefix = tuple(f"claude/settings.json:{k}" for k in CLAUDE_KEYS if k != "permissions")
+        elif source == "skills":
+            prefix = ("skill:",)
+        elif source in ("project_settings", "local_settings"):
+            prefix = ("project:",)
+        else:
+            return 0
+        changes, _ = compare(project_root(cwd), prefix)
+        if source in ("project_settings", "local_settings"):
+            changes = [c for c in changes if not c.endswith(":permissions")]
+        if changes:
+            STATE.mkdir(parents=True, exist_ok=True)
+            with open(STATE / "blocked.log", "a") as log:
+                log.write(json.dumps({"source": source, "changes": changes}) + "\n")
+            print(json.dumps({"decision": "block", "reason": "; ".join(changes)}))
+        return 0
+    print(f"agent-lock: unknown hook event {event}", file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str]) -> int:
+    cmd = argv[0] if argv else "check"
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    if cmd == "hook" and len(argv) > 1:
+        try:
+            return hook(argv[1])
+        except Exception as e:  # A broken check must never break a session.
+            print(f"agent-lock: {e}", file=sys.stderr)
+            return 0
+    if cmd == "approve":
+        project = project_root(os.getcwd())
+        snap = load()
+        items = dict(snap["items"]) if snap else {}
+        items = {k: v for k, v in items.items() if not k.startswith(("claude/", "file:", "skill:", "codex/"))
+                 and not (project and k.startswith(f"project:{project}/"))}
+        items.update(collect(project))
+        save(items)
+        print(f"agent-lock: approved {len(items)} items" + (f" (with {tilde(project)})" if project else ""))
+        return 0
+    if cmd == "check":
+        changes, blessed = compare(project_root(os.getcwd()))
+        if blessed:
+            print(f"agent-lock: {blessed} change(s) match dotfiles main and were approved")
+        if not changes:
+            print("agent-lock: no unapproved changes")
+            return 0
+        print(message(changes)[0])
+        return 1
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

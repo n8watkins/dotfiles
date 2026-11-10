@@ -30,3 +30,5 @@ jobs:
         run: bash home/.claude/hooks/confirm-destructive-git.test.sh
       - name: dcg rule pack
         run: bash home/.config/dcg/packs/n8.test.sh
+      - name: Config lock
+        run: bash bin/agent-lock.test.sh

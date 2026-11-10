@@ -10,6 +10,7 @@ How my coding agents (Claude Code and Codex) are set up: the rules every session
 | `skills/` | Playbooks: step-by-step procedures an agent loads only when the situation comes up. | `~/.agents/skills/`, linked into `~/.claude/skills/` and `~/.codex/skills/` |
 | `home/.claude/settings.json` | Claude Code settings: permission prompts, hooks, status line. | Copied to `~/.claude/settings.json` |
 | `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes and force pushes. | `~/.claude/hooks/` |
+| `bin/` | `trash` (move instead of delete) and `agent-lock` (the config lock). | `~/.local/bin/` |
 | `home/.config/dcg/` | Destructive command guard settings, exceptions and the `n8` rule pack for my databases and hosts. | `~/.config/dcg/` |
 | `home/.codex/config.hooks.toml` | The dcg hook for Codex. | A marked block inside `~/.codex/config.toml` |
 | `home/.npmrc`, `home/.config/pnpm/config.yaml` | Install cooldown: npm and pnpm only pick package versions published at least 3 days ago. | A marked block inside `~/.npmrc` and `~/.config/pnpm/config.yaml` |
@@ -77,6 +78,21 @@ The Claude Code hook is in `home/.claude/settings.json`.
 For Codex, `install.sh` adds the hook to `~/.codex/config.toml`; open Codex once and approve it under `/hooks`, or Codex skips it.
 A typical check takes 15 to 35 ms (dcg 0.16.0 on this machine); `git add` takes about 60 ms.
 Claude Code runs both PreToolUse hooks at the same time, so they do not add up.
+
+## Config lock
+
+`bin/agent-lock` notices when agent config changes without my OK.
+It covers what makes an agent run or trust something: Claude Code and Codex hooks, permissions, env, status line, MCP servers, plugins, skills, `CLAUDE.md`/`AGENTS.md`, Codex rules, the dcg config, and a repo's own `.claude/settings*.json`, `.mcp.json`, `.vscode/tasks.json` and `.codex/config.toml`.
+
+- At every session start (Claude Code and Codex), it compares them with the approved snapshot and shows me and the agent what changed.
+- A change that matches this repo's `main` branch came through a PR, so it is approved on its own.
+- During a Claude Code session, the `ConfigChange` hook keeps an unapproved new hook, env var, plugin or skill from taking effect until the next session, where it is reported. Claude Code shows no message for that, so the next session start is where you hear about it. Permission changes go through, since I make those from the prompt.
+- After a change you meant to make outside a PR, approve the current state: `! agent-lock approve` (in a repo, this also approves that repo's agent config).
+- `agent-lock check` lists what is not approved yet.
+
+The snapshot in `~/.local/state/agent-lock/` holds fingerprints and names only, never env values or MCP settings.
+dcg blocks agents from running `agent-lock approve`; an agent that edits the snapshot file directly is not stopped, so this is a tripwire, not a lock.
+Tests: `bin/agent-lock.test.sh`.
 
 ## Install cooldown
 

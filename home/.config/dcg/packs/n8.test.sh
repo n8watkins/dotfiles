@@ -83,6 +83,8 @@ expect allow 'vercel ls'
 expect deny  'dcg allow-once 123456'
 expect deny  'dcg allowlist add core.git:reset-hard -r because'
 expect deny  'dcg uninstall'
+expect deny  'agent-lock approve'
+expect allow 'agent-lock check'
 expect allow 'dcg test "git status"'
 expect allow 'dcg explain -- "git status"'
 # Wrappers and chains are seen through.

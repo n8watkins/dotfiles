@@ -87,6 +87,25 @@
             "statusMessage": "Normalizing AGENTS.md/CLAUDE.md symlink"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/natkins/.local/bin/agent-lock hook claude-session-start",
+            "statusMessage": "Checking agent config"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/natkins/.local/bin/agent-lock hook claude-config-change"
+          }
+        ]
       }
     ],
     "Stop": [

@@ -5,7 +5,8 @@
 #
 # Asks for: gh repo delete/archive, gh secret set/delete/remove, gh auth refresh
 # (changes the login's permissions), gh api DELETE calls, plain force pushes
-# (-f/--force/+refspec), and --force-with-lease pushes to main or master.
+# (-f/--force/+refspec), --force-with-lease pushes to main or master, and
+# pass-env run/pipe to anything outside SAFE_SECRET_USES.
 #
 # Does not ask for (owner, 2026-11-09):
 # - text that only mentions those commands (commit messages, PR bodies, heredocs,
@@ -141,6 +142,31 @@ def check_push(args, here):
         return "force-pushes to main or master"
     return None
 
+# pass-env run/pipe pass a secret without asking only to these (owner, 2026-11-09).
+# Printing forms are blocked by deny rules in settings.json either way.
+SAFE_SECRET_USES = [
+    ["wrangler", "deploy"], ["wrangler", "secret", "put"], ["wrangler", "secret", "bulk"],
+    ["wrangler", "d1", "migrations"], ["wrangler", "deployments"], ["wrangler", "versions"],
+    ["wrangler", "dev"], ["wrangler", "types"],
+    ["opennextjs-cloudflare"], ["vercel", "env", "add"], ["vercel", "deploy"], ["vercel", "--prod"],
+    ["npm", "run"], ["npm", "test"], ["npm", "start"], ["npm", "ci"],
+    ["pnpm", "run"], ["pnpm", "test"], ["pnpm", "dev"], ["pnpm", "build"], ["pnpm", "start"],
+    ["next", "dev"], ["next", "build"], ["next", "start"],
+    ["playwright", "test"], ["vitest"], ["uv", "run"],
+]
+
+def safe_secret_use(argv):
+    a = list(argv)
+    # npx / pnpm exec / pnpm dlx wrappers, with their flags and a pinned version.
+    while a and (os.path.basename(a[0]) in ("npx", "bunx") or a[:2] in (["pnpm", "exec"], ["pnpm", "dlx"], ["npm", "exec"])):
+        a = a[2:] if a[0] in ("pnpm", "npm") else a[1:]
+        while a and a[0].startswith("-"):
+            a = a[1:]
+    if not a:
+        return False
+    a[0] = re.sub(r"@[^/]*$", "", os.path.basename(a[0]))
+    return any(a[:len(p)] == p for p in SAFE_SECRET_USES)
+
 def check(argv, here):
     argv = unwrap(argv)
     if not argv:
@@ -151,8 +177,18 @@ def check(argv, here):
             if re.match(r"^-[a-z]*c[a-z]*$", a) and i + 1 < len(argv):
                 return scan(argv[i + 1], here)
         return None
-    if prog == "pass-env" and "--" in argv:
-        return check(argv[argv.index("--") + 1:], here)
+    if prog == "pass-env" and len(argv) > 1 and argv[1] in ("run", "pipe"):
+        inner = argv[argv.index("--") + 1:] if "--" in argv else []
+        inner_u = unwrap(inner)
+        piped_secret = (argv[1] == "pipe" and len(inner_u) >= 3
+                        and os.path.basename(inner_u[0]) == "gh" and inner_u[1:3] == ["secret", "set"])
+        if not piped_secret:
+            reason = check(inner, here)
+            if reason:
+                return reason
+        if piped_secret or safe_secret_use(inner_u):
+            return None
+        return "gives a secret to a command that is not on the safe list"
     if prog == "gh" and len(argv) >= 3:
         sub = argv[1:3]
         if sub[0] == "repo" and sub[1] == "delete":
@@ -206,6 +242,8 @@ def fallback(text):
     for p, r in pats:
         if p in text:
             return r
+    if re.search(r"pass-env\s+(run|pipe)\b", text):
+        return "gives a secret to a command"
     if re.search(r"gh\s+api\b.*(-X\s*DELETE|--method[\s=]+DELETE)", text):
         return "sends a DELETE request to the GitHub API"
     if re.search(r"git\s+push\b.*(\s(-f|--force|--force-with-lease(=\S*)?)(\s|$)|\s\+\S+)", text):

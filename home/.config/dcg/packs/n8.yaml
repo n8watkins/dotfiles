@@ -7,7 +7,7 @@
 schema_version: 1
 id: n8.stack
 name: n8 stack (Turso, D1, Drizzle, Prisma, Vercel)
-version: 1.0.0
+version: 1.1.0
 description: Deletes and resets for the databases and hosts used in n8watkins projects.
 
 keywords:
@@ -100,14 +100,22 @@ destructive_patterns:
     explanation: Deprecate the version instead (npm deprecate), or ask the owner.
 
   # dcg itself: only the owner lifts a block.
+  # These two match only where a command starts: the start of a part of the
+  # command (dcg splits on ; && || | and newlines, and takes apart sudo, env,
+  # timeout, bash -c, $( ), backticks and interpreter calls such as
+  # os.system), after ( { then do else elif, or after a launcher (xargs, watch,
+  # wsl, find -exec). So text that only mentions them, as in a heredoc written
+  # to a file, a Python string or a PR body, does not block (owner, 2026-11-10).
+  # dcg still reads a backtick span inside a heredoc for python3 as a command,
+  # so Markdown like `dcg allow-once` there blocks; use the Edit tool for that.
   - name: dcg-self-bypass
-    pattern: '\bdcg\s+(?:allow-once|allow|allowlist\s+(?:add|add-command)|uninstall|install|update)\b'
+    pattern: '(?:^|[;&|({\n]|\b(?:then|do|else|elif)\s|(?:^|\s)(?:xargs|watch|wsl(?:\.exe)?|-exec(?:dir)?|-ok(?:dir)?)\b[^;&|\n]*\s)\s*[\x22\x27]?(?:\S*/)?dcg[\x22\x27]?\s+[\x22\x27]?(?:allow-once|allow|allowlist[\x22\x27]?\s+[\x22\x27]?(?:add|add-command)|uninstall|install|update)\b'
     severity: critical
     description: Lifting, changing or removing dcg's blocks is the owner's call, not an agent's
     explanation: The owner can approve a blocked command himself, for example with ! dcg allow-once <code> in the prompt.
 
   - name: agent-lock-approve
-    pattern: '\bagent-lock\s+approve\b'
+    pattern: '(?:^|[;&|({\n]|\b(?:then|do|else|elif)\s|(?:^|\s)(?:xargs|watch|wsl(?:\.exe)?|-exec(?:dir)?|-ok(?:dir)?)\b[^;&|\n]*\s)\s*[\x22\x27]?(?:\S*/)?agent-lock[\x22\x27]?\s+[\x22\x27]?approve\b'
     severity: critical
     description: Approving agent config changes is the owner's call, not an agent's
     explanation: Tell the owner what changed (agent-lock check) and let him run ! agent-lock approve himself.

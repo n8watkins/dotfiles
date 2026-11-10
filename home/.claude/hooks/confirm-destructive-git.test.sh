@@ -302,6 +302,15 @@ rule deny 'tee ~/.config/systemd/user/hushkey-backup.service'
 rule deny 'sed -i s/x/y/ ~/.config/systemd/user/hushkey-backup.service'
 rule deny 'cp /tmp/evil ~/.local/bin/hushkey-backup-setup'
 rule allow 'rustic --help'
+# Text that only names the secret folders passes both layers (false alarm of
+# 2026-11-10). A heredoc or "$(cat <<EOF ...)" body that names them still hits
+# the reader rules above, which stay; agents write that text with the Write
+# tool and pass it with --body-file or -F (AGENTS.md).
+flow 'gh pr create --title x --body "Agents never open ~/.password-store, ~/.gnupg or ~/.config/hushkey"'
+flow 'gh pr edit 14 --body "The hook asks before restic reads ~/.config/hushkey/restic.env"'
+flow 'git commit -q -m "docs: never read ~/.password-store or ~/.config/hushkey/restic.env"'
+flow 'gh pr create --title x --body-file /tmp/claude-1000/scratchpad/pr-body.md'
+flow 'git commit -q -F /tmp/claude-1000/scratchpad/commit-msg.txt'
 
 # 3. Cloudflare R2: bucket delete, lock changes and object delete ask.
 run ask   "$tmp/feat" 'npx wrangler r2 bucket delete my-bucket'

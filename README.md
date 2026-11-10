@@ -48,9 +48,9 @@ It blocks rather than asks, also in bypass mode, and tells the agent to stop and
 
 | File | What it does |
 | --- | --- |
-| `home/.config/dcg/config.toml` | Turns on the packs for SQLite, PostgreSQL, Supabase, Cloudflare Workers, GitHub and GitHub Actions; every match blocks. |
-| `home/.config/dcg/packs/n8.yaml` | Rules dcg lacks for my stack: D1 `execute` with DROP, DELETE or TRUNCATE or a remote `--file`, D1 time-travel restore, `turso db shell` destructive SQL, `turso db/group destroy`, `drizzle-kit push/drop`, `prisma migrate reset`, `prisma db push --force-reset/--accept-data-loss`, Vercel removes, unpublishing a package, `agent-lock approve`, and `dcg allow-once`/`allowlist add` so an agent cannot lift a block itself. |
-| `home/.config/dcg/allowlist.toml` | Exceptions: `git branch -D`, `rm -rf` of build folders (`node_modules`, `dist`, `.next` and similar), branch deletes through the API, cancelling a CI run, and the GitHub deletes that `confirm-destructive-git.sh` and the `ask` rules already confirm with me. |
+| `home/.config/dcg/config.toml` | Turns on the packs for SQLite, PostgreSQL, Supabase, Cloudflare Workers, GitHub and GitHub Actions; every match blocks. Lets `rm -rf` of build caches (`.next`, `node_modules/.cache`, `dist`, `.turbo`, `coverage`, `playwright-report`, `test-results`) through, also inside a longer command: by full path inside `~/n8builds/worktrees/*` and `~/projects/worktrees/*`, or by bare name. |
+| `home/.config/dcg/packs/n8.yaml` | Rules dcg lacks for my stack: D1 `execute` with DROP, DELETE or TRUNCATE or a remote `--file`, D1 time-travel restore, `turso db shell` destructive SQL, `turso db/group destroy`, `drizzle-kit push/drop`, `prisma migrate reset`, `prisma db push --force-reset/--accept-data-loss`, Vercel removes, unpublishing a package, `agent-lock approve`, and `dcg allow-once`/`allowlist add` so an agent cannot lift a block itself. The last two match only where a command starts, so a heredoc or string that mentions them passes. |
+| `home/.config/dcg/allowlist.toml` | Exceptions: `git branch -D`, `rm -rf` of build folders (`node_modules`, `dist`, `.next` and similar), a `git mv "$f" <folder>` loop, branch deletes through the API, cancelling a CI run, and the GitHub deletes that `confirm-destructive-git.sh` and the `ask` rules already confirm with me. |
 | `home/.config/dcg/packs/n8.test.sh` | Tests through the same hook payload Claude Code sends, in bypass mode. CI runs them. |
 
 `confirm-destructive-git.sh` keeps doing its job next to dcg: it asks about GitHub deletes, Actions secrets, login permissions, force pushes, and secrets handed to commands outside the known deploy and test tools.
@@ -65,7 +65,9 @@ To override a block (owner only):
 
 Agents cannot do any of these: the n8 pack blocks `dcg allow-once`, `dcg allowlist add` and `dcg uninstall`.
 A determined agent could still write the command into a script and run that; dcg is a guardrail, not a sandbox.
-dcg also refuses some complex heredocs piped into `python3 -` or a shell that it cannot verify; writing the script to a file first avoids that.
+dcg also refuses some heredocs piped into `python3 -` or a shell that it cannot verify, and redirects to a path built from a variable.
+Those blocks stay, because the same rules catch real commands hidden in a bash heredoc.
+`AGENTS.md` tells agents to tell these method blocks apart from real ones and use their Edit, Write, Read and Grep tools instead, saying so in their report.
 
 Install the binary (it is not kept in this repo, since its license carries a rider that must travel with every copy):
 

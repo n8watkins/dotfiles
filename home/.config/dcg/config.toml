@@ -1,6 +1,7 @@
 # dcg (destructive command guard) settings. Linked to ~/.config/dcg/config.toml.
 # Hook entries live in home/.claude/settings.json (Claude) and in
-# ~/.codex/hooks.json (Codex, written by install.sh).
+# a marked block in ~/.codex/config.toml (Codex, written by install.sh from
+# home/.codex/config.hooks.toml).
 # README.md "Destructive command guard" explains how to override a block.
 
 [general]
@@ -27,3 +28,115 @@ custom_paths = ["~/.config/dcg/packs/*.yaml"]
 # Every match blocks, also for rules that would only warn by default.
 # "ask" is avoided: in bypass mode it is unclear whether Claude Code asks.
 default_mode = "deny"
+
+# Build caches agents delete and rebuild: rm -rf (or rm -r) of these targets
+# passes, also inside a longer command. dcg checks each target on its own, so
+# `rm -rf .next src`, `..` paths, globs and variables built at run time still
+# block (owner, 2026-11-10).
+# - Full paths only inside agent worktrees (~/n8builds/worktrees/<name>/... and
+#   ~/projects/worktrees/<name>/...).
+# - Bare relative names anywhere: dcg does not follow `cd`, so it cannot tell
+#   which folder a relative name is in. allowlist.toml already lets these run
+#   on their own in any folder; this lets them sit in a chain too.
+[rules."core.filesystem:rm-rf-general"]
+exempt_target_globs = [
+  "~/n8builds/worktrees/*/.next",
+  "~/n8builds/worktrees/*/node_modules/.cache",
+  "~/n8builds/worktrees/*/dist",
+  "~/n8builds/worktrees/*/.turbo",
+  "~/n8builds/worktrees/*/coverage",
+  "~/n8builds/worktrees/*/playwright-report",
+  "~/n8builds/worktrees/*/test-results",
+  "~/n8builds/worktrees/*/**/.next",
+  "~/n8builds/worktrees/*/**/node_modules/.cache",
+  "~/n8builds/worktrees/*/**/dist",
+  "~/n8builds/worktrees/*/**/.turbo",
+  "~/n8builds/worktrees/*/**/coverage",
+  "~/n8builds/worktrees/*/**/playwright-report",
+  "~/n8builds/worktrees/*/**/test-results",
+  "~/projects/worktrees/*/.next",
+  "~/projects/worktrees/*/node_modules/.cache",
+  "~/projects/worktrees/*/dist",
+  "~/projects/worktrees/*/.turbo",
+  "~/projects/worktrees/*/coverage",
+  "~/projects/worktrees/*/playwright-report",
+  "~/projects/worktrees/*/test-results",
+  "~/projects/worktrees/*/**/.next",
+  "~/projects/worktrees/*/**/node_modules/.cache",
+  "~/projects/worktrees/*/**/dist",
+  "~/projects/worktrees/*/**/.turbo",
+  "~/projects/worktrees/*/**/coverage",
+  "~/projects/worktrees/*/**/playwright-report",
+  "~/projects/worktrees/*/**/test-results",
+  ".next",
+  "node_modules/.cache",
+  "dist",
+  ".turbo",
+  "coverage",
+  "playwright-report",
+  "test-results",
+  "./.next",
+  "./node_modules/.cache",
+  "./dist",
+  "./.turbo",
+  "./coverage",
+  "./playwright-report",
+  "./test-results",
+]
+
+# The same targets for rm -r without -f.
+[rules."core.filesystem:rm-recursive-general"]
+exempt_target_globs = [
+  "~/n8builds/worktrees/*/.next",
+  "~/n8builds/worktrees/*/node_modules/.cache",
+  "~/n8builds/worktrees/*/dist",
+  "~/n8builds/worktrees/*/.turbo",
+  "~/n8builds/worktrees/*/coverage",
+  "~/n8builds/worktrees/*/playwright-report",
+  "~/n8builds/worktrees/*/test-results",
+  "~/n8builds/worktrees/*/**/.next",
+  "~/n8builds/worktrees/*/**/node_modules/.cache",
+  "~/n8builds/worktrees/*/**/dist",
+  "~/n8builds/worktrees/*/**/.turbo",
+  "~/n8builds/worktrees/*/**/coverage",
+  "~/n8builds/worktrees/*/**/playwright-report",
+  "~/n8builds/worktrees/*/**/test-results",
+  "~/projects/worktrees/*/.next",
+  "~/projects/worktrees/*/node_modules/.cache",
+  "~/projects/worktrees/*/dist",
+  "~/projects/worktrees/*/.turbo",
+  "~/projects/worktrees/*/coverage",
+  "~/projects/worktrees/*/playwright-report",
+  "~/projects/worktrees/*/test-results",
+  "~/projects/worktrees/*/**/.next",
+  "~/projects/worktrees/*/**/node_modules/.cache",
+  "~/projects/worktrees/*/**/dist",
+  "~/projects/worktrees/*/**/.turbo",
+  "~/projects/worktrees/*/**/coverage",
+  "~/projects/worktrees/*/**/playwright-report",
+  "~/projects/worktrees/*/**/test-results",
+  ".next",
+  "node_modules/.cache",
+  "dist",
+  ".turbo",
+  "coverage",
+  "playwright-report",
+  "test-results",
+  "./.next",
+  "./node_modules/.cache",
+  "./dist",
+  "./.turbo",
+  "./coverage",
+  "./playwright-report",
+  "./test-results",
+]
+
+# Not changed, because dcg cannot express them safely (2026-11-10):
+# - The heredoc "unverified" rules (heredoc.posix:substitution-unverified and
+#   the like) also guard bash heredocs, where `"$(` really runs what follows.
+#   Turning them down lets `bash <<EOF` with an unclosed `"$(` and `rm -rf`
+#   through. Agents edit files with their Edit/Write tools instead (AGENTS.md).
+# - core.filesystem:redirect-truncate-dynamic-path takes no exemptions by
+#   design, and turning it down would cover every variable redirect.
+# - core.filesystem:mv-dynamic-path has no per-command form; allowlist.toml
+#   covers the plain `git mv` loop.

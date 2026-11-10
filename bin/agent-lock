@@ -12,10 +12,13 @@ config (.claude/settings*.json, .mcp.json, .vscode/tasks.json, .codex/config.tom
                               codex-session-start, claude-config-change
 
 A change that matches the dotfiles repo's main branch (merged through a PR) is
-approved automatically. Everything else is reported until the owner runs
+approved automatically, except safety-critical config (SAFETY below): agents
+can merge dotfiles PRs, so a rule, hook, permission or guard change always
+waits for the owner. Everything else is reported until the owner runs
 `agent-lock approve`. The snapshot holds fingerprints and names, never values
 of env vars or MCP server settings.
 """
+import fnmatch
 import hashlib
 import json
 import os
@@ -39,6 +42,20 @@ CLAUDE_KEYS = [
 CODEX_KEYS = ["hooks", "mcp_servers", "notify", "approval_policy", "sandbox_mode",
               "sandbox_workspace_write", "shell_environment_policy", "profiles"]
 NO_SNAPSHOT = "no approved snapshot"
+# Safety-critical items (globs over item names; `*` also crosses `/`). They are
+# never approved by matching dotfiles main, only by the owner's approve. The
+# snapshot keeps this list as last approved and checks use both lists, so a copy
+# of this script with entries taken out still treats them as safety-critical.
+SAFETY = [
+    "claude/settings*.json:hooks", "claude/settings*.json:permissions",
+    "claude/settings*.json:disableAllHooks", "claude/settings*.json:sandbox",
+    "file:~/.claude/hooks/*", "file:~/.config/agent-hooks/*",
+    "file:~/.config/dcg/*",
+    "file:~/AGENTS.md", "file:~/.claude/CLAUDE.md", "file:~/.codex/AGENTS.md",
+    "file:~/.codex/rules/*", "codex/config.toml:hooks",
+    "file:~/.local/bin/agent-lock",
+]
+SAFETY_LIST = "agent-lock:safety-list"
 PROJECT_FILES = [".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
                  ".vscode/tasks.json", ".codex/config.toml"]
 
@@ -133,7 +150,8 @@ def collect(project: Path | None = None) -> dict:
                     continue
                 add(f"file:{tilde(f)}", file_print(f), f)
     for f in (HOME / ".claude/CLAUDE.md", HOME / "AGENTS.md", HOME / ".codex/AGENTS.md",
-              HOME / ".config/dcg/config.toml", HOME / ".config/dcg/allowlist.toml"):
+              HOME / ".config/dcg/config.toml", HOME / ".config/dcg/allowlist.toml",
+              HOME / ".local/bin/agent-lock"):
         add(f"file:{tilde(f)}", file_print(f), f)
 
     for folder in (HOME / ".claude/skills", HOME / ".codex/skills", HOME / ".agents/skills"):
@@ -222,22 +240,43 @@ def load() -> dict | None:
     return data if isinstance(data, dict) and "items" in data else None
 
 
-def save(items: dict) -> None:
+def save(items: dict, safety: list[str] | None) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     os.chmod(STATE, 0o700)
     tmp = SNAPSHOT.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"version": 1, "items": items}, indent=1, sort_keys=True) + "\n")
+    data = {"version": 1, "items": items}
+    if safety is not None:
+        data["safety"] = sorted(safety)
+    tmp.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
     os.chmod(tmp, 0o600)
     tmp.replace(SNAPSHOT)
 
 
+def is_safety(name: str, patterns) -> bool:
+    return any(fnmatch.fnmatchcase(name, p) for p in patterns)
+
+
+def safety_list_change(stored) -> str | None:
+    """How this script's SAFETY list differs from the one the owner last approved."""
+    if not isinstance(stored, list):
+        return f"new: {SAFETY_LIST} [not approved yet] (safety-critical)"
+    added, gone = sorted(set(SAFETY) - set(stored)), sorted(set(stored) - set(SAFETY))
+    if not added and not gone:
+        return None
+    diff = ", ".join([f"+{p}" for p in added] + [f"-{p}" for p in gone])
+    return f"changed: {SAFETY_LIST} [{diff}] (safety-critical)"
+
+
 def compare(project: Path | None, prefix: tuple[str, ...] = ()) -> tuple[list[str], int]:
-    """Changes not approved, as readable lines. Changes that match dotfiles main are approved on the way."""
+    """Changes not approved, as readable lines. Changes that match dotfiles main are approved
+    on the way, unless they are safety-critical: those wait for the owner."""
     snap = load()
     current = collect(project)
     if snap is None:
         return [NO_SNAPSHOT], 0
     approved = snap["items"]
+    stored = snap.get("safety")
+    patterns = set(SAFETY) | (set(stored) if isinstance(stored, list) else set())
     scope = [n for n in set(current) | set(approved)
              if (not n.startswith("project:") or (project and n.startswith(f"project:{project}/")))
              and (not prefix or n.startswith(prefix))]
@@ -246,14 +285,17 @@ def compare(project: Path | None, prefix: tuple[str, ...] = ()) -> tuple[list[st
         now, before = current.get(name), approved.get(name)
         if now and before and now["fp"] == before["fp"]:
             continue
-        if now and from_dotfiles(name, now):
+        safety = is_safety(name, patterns)
+        on_main = bool(now) and from_dotfiles(name, now)
+        if on_main and not safety:
             approved[name] = now
             blessed += 1
             continue
         if now and not before:
             what = "new"
         elif before and not now:
-            if name.startswith("claude/settings.json:") and from_dotfiles_removed(name):
+            on_main = name.startswith("claude/settings.json:") and from_dotfiles_removed(name)
+            if on_main and not safety:
                 del approved[name]
                 blessed += 1
                 continue
@@ -261,9 +303,16 @@ def compare(project: Path | None, prefix: tuple[str, ...] = ()) -> tuple[list[st
         else:
             what = "changed"
         show = (now or before or {}).get("show")
-        changes.append(f"{what}: {name}" + (f" [{show}]" if show else ""))
+        line = f"{what}: {name}" + (f" [{show}]" if show else "")
+        if safety:
+            line += " (safety-critical" + (", matches dotfiles main" if on_main else "") + ")"
+        changes.append(line)
+    if not prefix:
+        listed = safety_list_change(stored)
+        if listed:
+            changes.insert(0, listed)
     if blessed:
-        save(approved)
+        save(approved, stored if isinstance(stored, list) else None)
     return changes, blessed
 
 
@@ -280,11 +329,16 @@ def message(changes: list[str]) -> tuple[str, str]:
     if changes == [NO_SNAPSHOT]:
         return ("agent-lock: no approved snapshot yet, so changes cannot be checked. Approve the current state with: ! agent-lock approve",
                 "agent-lock has no approved snapshot of the agent config yet. Tell the owner; do not run agent-lock approve yourself.")
+    # Safety-critical changes first, so the 20-line cut never hides one.
+    changes = sorted(changes, key=lambda c: "(safety-critical" not in c)
+    safety = sum("(safety-critical" in c for c in changes)
     listed = "\n".join(f"  - {c}" for c in changes[:20]) + (f"\n  - and {len(changes) - 20} more" if len(changes) > 20 else "")
-    user = (f"agent-lock: {len(changes)} agent config change(s) were not approved:\n{listed}\n"
-            "If you made them, approve with: ! agent-lock approve   (details: agent-lock check)")
+    note = (f"{safety} of them are safety-critical (rules, hooks, permissions, guards or agent-lock itself) "
+            "and always need the owner's approval, even when they match dotfiles main.\n") if safety else ""
+    user = (f"agent-lock: {len(changes)} agent config change(s) were not approved:\n{listed}\n{note}"
+            "If you made or reviewed them, approve with: ! agent-lock approve   (details: agent-lock check)")
     agent = (f"agent-lock found {len(changes)} change(s) to agent config (hooks, permissions, MCP servers, "
-             f"plugins, skills or rules files) that the owner has not approved:\n{listed}\n"
+             f"plugins, skills or rules files) that the owner has not approved:\n{listed}\n{note}"
              "Tell the owner about this at the start of your next reply. Do not run agent-lock approve "
              "yourself and do not edit ~/.local/state/agent-lock.")
     return user, agent
@@ -348,7 +402,7 @@ def main(argv: list[str]) -> int:
         items = {k: v for k, v in items.items() if not k.startswith(("claude/", "file:", "skill:", "codex/"))
                  and not (project and k.startswith(f"project:{project}/"))}
         items.update(collect(project))
-        save(items)
+        save(items, SAFETY)
         print(f"agent-lock: approved {len(items)} items" + (f" (with {tilde(project)})" if project else ""))
         return 0
     if cmd == "check":

@@ -1,4 +1,5 @@
-# Runs the guard tests: the git confirmation hook and the dcg rule pack.
+# Runs the guard tests: the git confirmation hook and settings rules, the dcg
+# rule pack, the config lock and the Codex command rules.
 name: Tests
 
 on:
@@ -32,3 +33,9 @@ jobs:
         run: bash home/.config/dcg/packs/n8.test.sh
       - name: Config lock
         run: bash bin/agent-lock.test.sh
+      - name: Install Codex (for its rule matcher)
+        run: npm install --global @openai/codex@0.163.0
+      - name: Codex command rules
+        run: |
+          command -v codex
+          bash home/.codex/rules/guardrails.test.sh

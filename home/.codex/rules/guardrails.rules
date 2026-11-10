@@ -1,0 +1,93 @@
+# Codex command rules that mirror the Claude Code permission rules in
+# home/.claude/settings.json (secrets, Hushkey backup, Windows Hello, R2 locks,
+# releases). Linked to ~/.codex/rules/guardrails.rules by install.sh; Codex loads
+# every .rules file in that folder and applies the most restrictive match.
+#
+# Limits (Codex rules match a fixed command prefix, word by word):
+# - No wildcards inside a word or between words, so `pass-env pipe <entry> -- cat`,
+#   `--no-mask` after an entry name and tag names such as v1.2.3 cannot be matched.
+#   Those forms are listed where a fixed prefix still catches the common case.
+# - File reads (cat ~/.config/hushkey/...) are not command prefixes; command rules
+#   cannot block them. Codex's sandbox deny paths would (owner follow-up).
+# - `bash -lc "<script>"` is split into commands only for plain chains of words;
+#   scripts with redirects, substitutions or variables are matched as one command.
+# Tests: home/.codex/rules/guardrails.test.sh (codex execpolicy check).
+
+# Absolute paths to these programs match the rules for their bare name.
+host_executable(name = "restic", paths = ["/home/natkins/.local/bin/restic", "/usr/local/bin/restic", "/usr/bin/restic"])
+host_executable(name = "pass-env", paths = ["/home/natkins/.local/bin/pass-env", "/home/linuxbrew/.linuxbrew/bin/pass-env", "/usr/local/bin/pass-env"])
+host_executable(name = "hushkey", paths = ["/home/natkins/.local/bin/hushkey", "/home/linuxbrew/.linuxbrew/bin/hushkey", "/usr/local/bin/hushkey"])
+
+SECRET_TOOLS = ["pass-env", "hushkey"]
+PRINTERS = ["env", "printenv", "echo", "printf", "sh", "bash", "zsh", "dash", "cat", "tee",
+            "python", "python3", "node", "bun", "deno", "perl", "ruby", "awk", "xargs", "restic"]
+
+# The password store and GPG.
+prefix_rule(pattern = ["pass"], decision = "forbidden",
+    justification = "Secrets are used only through pass-env/hushkey, never read from pass.",
+    match = [["pass", "show", "a/B"]], not_match = [["passwd"]])
+prefix_rule(pattern = ["gpg", ["-d", "--decrypt"]], decision = "forbidden",
+    justification = "Never decrypt the password store.")
+
+# Printing a secret.
+prefix_rule(pattern = [SECRET_TOOLS, "copy"], decision = "forbidden",
+    justification = "copy puts a secret on the clipboard.")
+prefix_rule(pattern = [SECRET_TOOLS, "run", "--", PRINTERS], decision = "forbidden",
+    justification = "This prints or exposes the secret. Use a deploy or test command.",
+    match = [["pass-env", "run", "--", "printenv"], ["hushkey", "run", "--", "env"]],
+    not_match = [["pass-env", "run", "--", "npx", "wrangler", "deploy"]])
+prefix_rule(pattern = [SECRET_TOOLS, "run", ["-f", "--file"], ".env.pass", "--", PRINTERS], decision = "forbidden",
+    justification = "This prints or exposes the secret. Use a deploy or test command.")
+prefix_rule(pattern = [SECRET_TOOLS, "run", "--no-mask"], decision = "forbidden",
+    justification = "Output masking stays on for agents (H6).",
+    match = [["hushkey", "run", "--no-mask", "--", "npm", "test"]])
+prefix_rule(pattern = [SECRET_TOOLS, "pipe"], decision = "prompt",
+    justification = "pipe hands one secret to a command; Codex rules cannot check which command, so it asks.")
+prefix_rule(pattern = [SECRET_TOOLS, ["generate", "import", "scrub"]], decision = "prompt",
+    justification = "generate --force, import --remove and scrub --fix change the store.")
+
+# Windows Hello (H7).
+prefix_rule(pattern = [SECRET_TOOLS, "unlock", "--hello"], decision = "forbidden",
+    justification = "Only the owner starts a Windows Hello prompt.")
+prefix_rule(pattern = [SECRET_TOOLS, "hello", ["install", "enrol", "enroll", "forget"]], decision = "forbidden",
+    justification = "Only the owner changes the Windows Hello set-up.")
+prefix_rule(pattern = [["pass-env-hello.exe", "hushkey-hello.exe", "./pass-env-hello.exe", "./hushkey-hello.exe"]], decision = "forbidden",
+    justification = "Agents never run the Windows Hello helper directly.")
+# Not covered: the helper started through cmd.exe or powershell.exe. A prompt on
+# those launchers would override the powershell.exe allow in default.rules that
+# Codex builds use.
+
+# Backup (restic and its keys).
+prefix_rule(pattern = ["restic"], decision = "forbidden",
+    justification = "restic reads the backup keys; only the owner runs it.",
+    match = [["restic", "snapshots"]], not_match = [["rustic"]])
+prefix_rule(pattern = ["systemctl", "--user", "show-environment"], decision = "forbidden",
+    justification = "Prints the user service environment.")
+prefix_rule(pattern = ["journalctl", "--user", ["-u", "--unit"], ["hushkey-backup", "hushkey-backup.service", "hushkey-backup.timer"]], decision = "forbidden",
+    justification = "Backup logs are for the owner.")
+
+# Cloudflare R2 bucket locks and deletes.
+WRANGLER = [["wrangler"], ["npx", "wrangler"], ["npx", "--yes", "wrangler"], ["pnpm", "exec", "wrangler"], ["bunx", "wrangler"]]
+[prefix_rule(pattern = w + ["r2", "bucket", "delete"], decision = "prompt",
+    justification = "Deletes an R2 bucket.") for w in WRANGLER]
+[prefix_rule(pattern = w + ["r2", "bucket", "lock", ["add", "remove", "set"]], decision = "prompt",
+    justification = "Changes the lock rules of an R2 bucket.") for w in WRANGLER]
+[prefix_rule(pattern = w + ["r2", "object", "delete"], decision = "prompt",
+    justification = "Deletes an R2 object.") for w in WRANGLER]
+
+# Releases need the owner's approval.
+prefix_rule(pattern = ["git", "push", ["--tags", "--follow-tags", "--mirror"]], decision = "forbidden",
+    justification = "Pushing tags publishes releases; the owner pushes release tags.")
+prefix_rule(pattern = ["git", "push", ["origin", "upstream"], ["--tags", "--follow-tags", "--mirror", "tag"]], decision = "forbidden",
+    justification = "Pushing tags publishes releases; the owner pushes release tags.")
+prefix_rule(pattern = ["git", "tag", ["-a", "-s", "-f", "-d", "--delete", "--annotate", "--sign", "--force"]], decision = "forbidden",
+    justification = "Release tags are the owner's.")
+prefix_rule(pattern = ["gh", "release", ["create", "edit", "delete", "upload", "delete-asset"]], decision = "forbidden",
+    justification = "GitHub releases are the owner's.")
+prefix_rule(pattern = [["npm", "pnpm", "yarn", "bun"], "publish"], decision = "forbidden",
+    justification = "Publishing a package is the owner's.")
+prefix_rule(pattern = [["npm", "pnpm", "yarn", "bun"], "run", "release"], decision = "prompt",
+    justification = "The release script tags and publishes (the --via-pr flow included); ask the owner.",
+    match = [["npm", "run", "release", "--", "--push", "--via-pr"]], not_match = [["npm", "run", "release:check"]])
+prefix_rule(pattern = [["pnpm", "yarn"], "release"], decision = "prompt",
+    justification = "The release script tags and publishes; ask the owner.")

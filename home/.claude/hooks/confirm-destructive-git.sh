@@ -6,8 +6,15 @@
 # Asks for: gh repo delete/archive, gh secret set/delete/remove, gh auth refresh
 # (changes the login's permissions), gh api DELETE calls, plain force pushes
 # (-f/--force/+refspec), --force-with-lease pushes to main or master, and
-# pass-env run/pipe to anything but the known deploy and test tools (see
+# pass-env/hushkey run/pipe to anything but the known deploy and test tools (see
 # SAFE_SECRET_USES: inline code, script paths, interpreters and custom configs ask).
+# Hushkey (owner, 2026-11-10): run/pipe --no-mask, restic, the backup files,
+# unit and script, Windows Hello unlock and helper runs, destructive wrangler r2
+# commands, and releases (v* tags, gh release, publish, release scripts, gh api
+# writes to pending_deployments, environments and rulesets).
+# This hook only asks. Most of those are also denied for agents by the
+# permission rules in settings.json; the hook is the second layer that reads
+# commands the way bash does (bash -c, full paths, wrappers).
 #
 # Does not ask for (owner, 2026-11-09):
 # - text that only mentions those commands (commit messages, PR bodies, heredocs,
@@ -56,6 +63,7 @@ def strip_heredocs(text):
     return "\n".join(out)
 
 REDIRECT = re.compile(r"&>>?|<<<|<<-?|<>|>>|>&|<&|>\||<|>")
+REDIRECT_TARGETS = []  # files read or written by redirects (> file, < file), checked in scan()
 
 def simple_commands(text):
     """Split text into simple commands (lists of words) the way bash reads it.
@@ -71,6 +79,7 @@ def simple_commands(text):
         nonlocal cur, skip
         if cur is not None:
             if skip:
+                REDIRECT_TARGETS.append(cur)
                 skip = False
             else:
                 words.append(cur)
@@ -168,23 +177,48 @@ def current_branch(path):
     except Exception:
         return None
 
-def check_push(args, here):
+# A release tag: v1, v1.2.3, v2.0.0-rc.1, refs/tags/v1.2.3 (optionally src:dst),
+# not a branch such as v2-redesign.
+RELEASE_TAG = re.compile(r"^\+?(refs/tags/)?v[0-9]+((\.[0-9]+)+([-+][0-9A-Za-z.-]+)?)?"
+                         r"(:(refs/tags/)?v[0-9][^:]*)?$")
+TAG_LIST_FLAGS = {"-l", "--list", "-v", "--verify", "--contains", "--no-contains",
+                  "--points-at", "--merged", "--no-merged"}
+
+def git_subcommand(args, here):
+    """args after "git": skip global options; returns (subcommand, rest, git_dir)."""
     git_dir = here
-    # args are after "git"; handle git -C dir push ...
-    while args and args[0] != "push":
+    while args:
         if args[0] == "-C" and len(args) > 1:
             git_dir = os.path.join(git_dir, os.path.expanduser(args[1]))
             args = args[2:]
-        elif args[0].startswith("-c") or args[0].startswith("--"):
-            args = args[2:] if args[0] == "-c" else args[1:]
+        elif args[0] == "-c":
+            args = args[2:]
+        elif args[0].startswith("-"):
+            args = args[1:]
         else:
+            return args[0], args[1:], git_dir
+    return None, [], git_dir
+
+def check_git(args, here):
+    sub, rest, git_dir = git_subcommand(args, here)
+    if sub == "tag":
+        if any(flag_name(a) in TAG_LIST_FLAGS for a in rest):
             return None
-    if not args:
+        if any(RELEASE_TAG.match(a) for a in rest if not a.startswith("-")):
+            return "creates or changes a release tag (v*), which publishes a release"
         return None
-    rest = args[1:]
+    if sub == "push":
+        return check_push(rest, git_dir)
+    return None
+
+def check_push(rest, git_dir):
+    if any(a in ("--tags", "--follow-tags", "--mirror") for a in rest):
+        return "pushes tags, and a v* tag publishes a release"
+    positional = [a for a in rest if not a.startswith("-")]
+    if "tag" in positional[1:] or any(RELEASE_TAG.match(r) for r in positional[1:]):
+        return "pushes a release tag (v*), which publishes a release"
     hard = any(a in ("-f", "--force") or (re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", a) and not a.startswith("--")) for a in rest)
     lease = any(a.startswith("--force-with-lease") or a.startswith("--force-if-includes") for a in rest)
-    positional = [a for a in rest if not a.startswith("-")]
     refspecs = positional[1:]
     plus = any(r.startswith("+") for r in refspecs)
     if hard or plus:
@@ -349,6 +383,80 @@ def safe_secret_use(argv):
                 return False
     return True
 
+# The secret tool under its old and new name (owner, 2026-11-10).
+SECRET_TOOLS = {"pass-env", "hushkey"}
+HELLO_HELPER = re.compile(r"(pass-env|hushkey)-hello(\.exe)?($|[\x27\" ])", re.I)
+WINDOWS_LAUNCHERS = {"cmd.exe", "cmd", "powershell.exe", "powershell", "pwsh.exe", "pwsh",
+                     "wsl.exe", "explorer.exe", "rundll32.exe", "conhost.exe", "start"}
+# The backup token and machine key, the unit that runs restic with them, the
+# setup script, and the Windows Hello blob and helper folder. Any running
+# command that names one asks.
+BACKUP_PATHS = re.compile(r"\.config/hushkey($|[/\x27\"])|\.config/systemd/user/hushkey-backup|"
+                          r"\.local/bin/hushkey-backup|(^|/)hello\.blob($|[\x27\"])|"
+                          r"AppData[/\\]+Local[/\\]+(pass-env|hushkey)($|[/\\\x27\"])", re.I)
+# Commands whose arguments are text (messages, bodies): only their file flags count.
+FILE_FLAGS = {"-F", "--file", "--body-file", "-t", "--template"}
+SYSTEMCTL_READ_ONLY = {"status", "is-active", "is-enabled", "is-failed", "list-timers",
+                       "list-units", "list-unit-files", "start"}
+RELEASE_ENDPOINT = re.compile(r"(^|/)(pending_deployments|environments|rulesets)($|[/?])")
+GH_API_FIELD_FLAGS = {"-f", "-F", "--field", "--raw-field", "--input"}
+
+def text_command(argv):
+    prog = os.path.basename(argv[0])
+    if prog in ("echo", "printf", "true", ":"):
+        return True
+    if prog == "git":
+        return git_subcommand(argv[1:], ".")[0] in ("commit", "notes")
+    if prog == "gh" and len(argv) >= 3:
+        return argv[1] in ("pr", "issue") and argv[2] in ("create", "edit", "comment", "review", "close")
+    return False
+
+def backup_path_reason(argv):
+    args = argv
+    if text_command(argv):
+        args = [a for i, a in enumerate(argv[1:], 1)
+                if argv[i - 1] in FILE_FLAGS or (flag_name(a) in FILE_FLAGS and "=" in a)
+                or re.match(r"^-F.", a)]
+    if any(BACKUP_PATHS.search(a) for a in args):
+        return "touches the Hushkey backup files, unit or script, or the Windows Hello files"
+    return None
+
+def tool_name(a):
+    return re.sub(r"(?<=.)@[^/]*$", "", os.path.basename(a))
+
+def wrangler_reason(argv):
+    for i, a in enumerate(argv[:4]):
+        if tool_name(a) == "wrangler":
+            pos = [x for x in argv[i + 1:] if not x.startswith("-")]
+            if pos[:3] == ["r2", "bucket", "delete"]:
+                return "deletes an R2 bucket"
+            if pos[:3] == ["r2", "bucket", "lock"] and pos[3:4] != ["list"]:
+                return "changes the lock rules of an R2 bucket"
+            if pos[:3] == ["r2", "object", "delete"]:
+                return "deletes an R2 object"
+            return None
+    return None
+
+def release_reason(argv):
+    """Publishing a package or running a release script (they tag and publish)."""
+    prog, a = tool_name(argv[0]), argv[1:]
+    if prog in ("npx", "bunx"):
+        a = [x for x in a if not x.startswith("-")]
+        if not a:
+            return None
+        prog, a = tool_name(a[0]), a[1:]
+    pos = [x for x in a if not x.startswith("-")]
+    if prog in ("npm", "pnpm", "yarn", "bun") and (pos[:1] == ["publish"] or pos[:2] == ["npm", "publish"]):
+        return "publishes a package"
+    if prog in ("npm", "pnpm", "yarn", "bun") and (pos[:2] in (["run", "release"], ["run-script", "release"])
+                                                  or pos[:1] == ["release"]):
+        return "runs the release script, which tags and publishes a release"
+    if prog == "release-kit" and pos[:1] == ["release"]:
+        return "runs the release script, which tags and publishes a release"
+    if prog in ("node", "bun") and any(re.search(r"release-kit/release\.m?js$", x) for x in a):
+        return "runs the release script, which tags and publishes a release"
+    return None
+
 def check(argv, here):
     argv = unwrap(argv)
     if not argv:
@@ -359,8 +467,38 @@ def check(argv, here):
             if re.match(r"^-[a-z]*c[a-z]*$", a) and i + 1 < len(argv):
                 return scan(argv[i + 1], here)
         return None
-    if prog == "pass-env" and len(argv) > 1 and argv[1] in ("run", "pipe"):
+    reason = backup_path_reason(argv)
+    if reason:
+        return reason
+    if prog == "restic":
+        return "runs restic, which reads the backup keys"
+    if prog == "find" and any("hushkey" in a for a in argv) \
+            and any(a in ("-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls") for a in argv):
+        return "runs a command on files named after Hushkey"
+    if HELLO_HELPER.match(prog) or (prog.lower() in WINDOWS_LAUNCHERS
+                                    and any(HELLO_HELPER.search(a) for a in argv[1:])):
+        return "runs the Windows Hello helper directly"
+    if prog == "systemctl":
+        if "show-environment" in argv:
+            return "prints the user service environment"
+        if any("hushkey-backup" in a for a in argv):
+            sub = [a for a in argv[1:] if not a.startswith("-")]
+            if not sub or sub[0] not in SYSTEMCTL_READ_ONLY:
+                return "reads or changes the Hushkey backup unit"
+    if prog == "journalctl" and any("hushkey-backup" in a for a in argv):
+        return "reads the Hushkey backup logs"
+    reason = wrangler_reason(argv) or release_reason(argv)
+    if reason:
+        return reason
+    if prog in SECRET_TOOLS and len(argv) > 1:
+        if argv[1] == "unlock" and "--hello" in argv:
+            return "starts a Windows Hello unlock"
+        if argv[1] == "hello" and argv[2:3] and argv[2] in ("install", "enrol", "enroll", "forget"):
+            return "changes the Windows Hello set-up"
+    if prog in SECRET_TOOLS and len(argv) > 1 and argv[1] in ("run", "pipe"):
         inner = argv[argv.index("--") + 1:] if "--" in argv else []
+        if "--no-mask" in (argv[:argv.index("--")] if "--" in argv else argv):
+            return "turns off output masking for a secret"
         inner_u = unwrap(inner)
         piped_secret = (argv[1] == "pipe" and len(inner_u) >= 3
                         and os.path.basename(inner_u[0]) == "gh" and inner_u[1:3] == ["secret", "set"])
@@ -375,6 +513,8 @@ def check(argv, here):
         return "gives a secret to a command that is not on the safe list"
     if prog == "gh" and len(argv) >= 3:
         sub = argv[1:3]
+        if sub[0] == "release" and sub[1] in ("create", "edit", "delete", "upload", "delete-asset"):
+            return "creates or changes a GitHub release"
         if sub[0] == "repo" and sub[1] == "delete":
             return "deletes a GitHub repository"
         if sub[0] == "repo" and sub[1] == "archive":
@@ -393,23 +533,31 @@ def check(argv, here):
                 method = a[2:]
             elif a.startswith("--method="):
                 method = a.split("=", 1)[1]
+        endpoints = [a for a in args if not a.startswith("-") and "/" in a]
+        fields = any(flag_name(a) in GH_API_FIELD_FLAGS or re.match(r"^-[fF].", a) for a in args)
+        if (method or ("POST" if fields else "GET")).upper() != "GET" \
+                and any(RELEASE_ENDPOINT.search(e) for e in endpoints):
+            return "approves a deployment or changes environments or rulesets through the GitHub API"
         if method and method.upper() == "DELETE":
-            endpoints = [a for a in args if not a.startswith("-") and "/" in a]
             if endpoints and all(re.search(r"(^|/)repos/[^/]+/[^/]+/git/refs/heads/", e) for e in endpoints):
                 return None
             return "sends a DELETE request to the GitHub API"
     if prog == "git":
-        return check_push(argv[1:], here)
+        return check_git(argv[1:], here)
     return None
 
 def scan(text, here):
     global risky_env
     cmds = simple_commands(strip_heredocs(text))
+    if any(BACKUP_PATHS.search(t) for t in REDIRECT_TARGETS):
+        return "reads or writes the Hushkey backup files, unit or script through a redirect"
     # export NODE_OPTIONS=... earlier in the same command line counts too.
     risky_env = risky_env or any(sets_risky_env(argv) for argv in cmds)
     for argv in cmds:
         a = unwrap(argv)
-        if a and a[0] == "cd":
+        if a and a[0] in ("cd", "pushd"):
+            if len(a) > 1 and BACKUP_PATHS.search(a[1]):
+                return "enters the Hushkey backup folder"
             if len(a) > 1:
                 here = os.path.join(here, os.path.expanduser(a[1]))
             continue
@@ -430,8 +578,14 @@ def fallback(text):
     for p, r in pats:
         if p in text:
             return r
-    if re.search(r"pass-env\s+(run|pipe)\b", text):
+    if re.search(r"(pass-env|hushkey)\s+(run|pipe)\b", text):
         return "gives a secret to a command"
+    if re.search(r"\.config/hushkey|hushkey-backup|\brestic\b|-hello\.exe|hello\.blob|--hello\b|"
+                 r"\bhello\s+(install|enrol|enroll|forget)\b|show-environment", text):
+        return "touches the Hushkey backup or Windows Hello"
+    if re.search(r"gh\s+release\s+(create|edit|delete|upload)|\bpublish\b|\brun\s+release\b|"
+                 r"git\s+push\b.*--(follow-)?tags|git\s+tag\b.*\sv[0-9]|r2\s+(bucket|object)\s", text):
+        return "may publish a release or change an R2 bucket"
     if re.search(r"gh\s+api\b.*(-X\s*DELETE|--method[\s=]+DELETE)", text):
         return "sends a DELETE request to the GitHub API"
     if re.search(r"git\s+push\b.*(\s(-f|--force|--force-with-lease(=\S*)?)(\s|$)|\s\+\S+)", text):

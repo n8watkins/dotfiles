@@ -20,7 +20,6 @@ enabled = [
   "cdn.cloudflare_workers",
   "platform.github",
   "cicd.github_actions",
-  "package_managers",
 ]
 custom_paths = ["~/.config/dcg/packs/*.yaml"]
 

@@ -54,7 +54,18 @@
       "Bash(pass-env run *-- node -p*)",
       "Bash(pass-env run *-- python* -c*)",
       "Bash(pass-env pipe *-- cat*)",
-      "Bash(pass-env pipe *-- tee*)"
+      "Bash(pass-env pipe *-- tee*)",
+      "Bash(pass-env pipe *-- sh*)",
+      "Bash(pass-env pipe *-- bash*)",
+      "Bash(pass-env pipe *-- zsh*)",
+      "Bash(pass-env pipe *-- python*)",
+      "Bash(pass-env pipe *-- node *)",
+      "Bash(pass-env pipe *-- bun *)",
+      "Bash(pass-env pipe *-- perl*)",
+      "Bash(pass-env pipe *-- ruby*)",
+      "Bash(pass-env pipe *-- awk*)",
+      "Bash(pass-env pipe *-- env*)",
+      "Bash(pass-env pipe *-- xargs*)"
     ]
   },
   "hooks": {

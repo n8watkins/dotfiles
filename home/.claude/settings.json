@@ -22,8 +22,6 @@
       "Bash(gh auth refresh:*)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
-      "Bash(pass-env run *)",
-      "Bash(pass-env pipe *)",
       "Bash(pass-env generate * --force*)",
       "Bash(pass-env import * --remove*)",
       "Bash(pass-env scrub *--fix*)"

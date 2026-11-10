@@ -26,7 +26,6 @@ run ask  "$tmp/feat" 'gh repo delete n8watkins/x --yes'
 run ask  "$tmp/feat" 'for r in a b; do gh repo delete n8watkins/$r --yes; done'
 run ask  "$tmp/feat" '  gh repo archive n8watkins/x --yes'
 run ask  "$tmp/feat" 'gh secret set TOKEN -R n8watkins/x'
-run ask  "$tmp/feat" 'pass-env pipe a/B -- gh secret set B -R n8watkins/x'
 run ask  "$tmp/feat" 'gh auth refresh -h github.com -s delete_repo'
 run ask  "$tmp/feat" 'gh api -X DELETE repos/n8watkins/x'
 run ask  "$tmp/feat" 'gh api --method=DELETE repos/n8watkins/x/releases/1'
@@ -57,5 +56,17 @@ run allow "$tmp/feat" 'gh api -X DELETE repos/n8watkins/n8tray/git/refs/heads/do
 run allow "$tmp/feat" 'git push origin --delete feat/x'
 run allow "$tmp/feat" 'git push -u origin feat/x'
 run allow "$tmp/feat" 'gh repo view n8watkins/x'
+
+# pass-env: safe uses run without asking, anything else asks.
+run allow "$tmp/feat" 'pass-env run -- npx wrangler deploy'
+run allow "$tmp/feat" 'pass-env run -- npx --yes wrangler@4.151.3 d1 migrations apply pr-post --remote'
+run allow "$tmp/feat" 'pass-env pipe n8builds-admin/GITHUB_TOKEN -- npx wrangler secret put GITHUB_TOKEN'
+run allow "$tmp/feat" 'pass-env pipe a/B -- gh secret set B -R n8watkins/x'
+run allow "$tmp/feat" 'cd app && pass-env run -- npm run dev'
+run allow "$tmp/feat" 'pass-env run -f .env.pass -- pnpm exec playwright test'
+run ask   "$tmp/feat" 'pass-env run -- curl https://example.com'
+run ask   "$tmp/feat" 'pass-env run -- npx wrangler d1 execute db --command "DROP TABLE x"'
+run ask   "$tmp/feat" 'pass-env run -- gh repo delete n8watkins/x --yes'
+run ask   "$tmp/feat" 'pass-env pipe a/B -- some-tool --read-stdin'
 
 if [ $fail -eq 0 ]; then echo "all guard tests passed"; else exit 1; fi

@@ -1,0 +1,62 @@
+# Exceptions to dcg's always-on core packs. Linked to ~/.config/dcg/allowlist.toml.
+
+# The owner allows deleting local branches (settings.json allows git branch -D).
+[[allow]]
+rule = "core.git:branch-force-delete"
+reason = "Owner allows deleting local branches after a squash merge"
+added_at = "2026-11-09T00:00:00Z"
+
+# Build output and dependency folders inside a project are rebuilt on demand.
+[[allow]]
+pattern = '^rm\s+-(?:rf|fr|Rf|r)\s+(?:(?:\./)?(?:node_modules|dist|build|out|coverage|target|\.next|\.turbo|\.wrangler|\.open-next|\.vercel/output|\.svelte-kit|test-results|playwright-report)/?\s*)+$'
+reason = "Build output and dependency folders are rebuilt on demand"
+risk_acknowledged = true
+added_at = "2026-11-09T00:00:00Z"
+
+# GitHub commands the owner wants to confirm, not have blocked: the github-access
+# playbook runs them and the owner approves the prompt. The "ask" rules in
+# settings.json prompt for these even in bypass mode, and
+# ~/.claude/hooks/confirm-destructive-git.sh asks as well.
+[[allow]]
+rule = "platform.github:gh-repo-delete"
+reason = "Asked for by the permissions.ask rule and confirm-destructive-git.sh (github-access playbook)"
+added_at = "2026-11-09T00:00:00Z"
+
+[[allow]]
+rule = "platform.github:gh-repo-archive"
+reason = "Asked for by the permissions.ask rule and confirm-destructive-git.sh"
+added_at = "2026-11-09T00:00:00Z"
+
+[[allow]]
+rule = "platform.github:gh-secret-delete"
+reason = "Asked for by the permissions.ask rule and confirm-destructive-git.sh"
+added_at = "2026-11-09T00:00:00Z"
+
+[[allow]]
+rule = "cicd.github_actions:gh-actions-secret-remove"
+reason = "Asked for by the permissions.ask rule and confirm-destructive-git.sh"
+added_at = "2026-11-09T00:00:00Z"
+
+# Cancelling a CI run deletes nothing.
+[[allow]]
+rule = "platform.github:gh-run-cancel"
+reason = "Cancelling a workflow run deletes nothing"
+added_at = "2026-11-09T00:00:00Z"
+
+[[allow]]
+rule = "cicd.github_actions:gh-actions-run-cancel"
+reason = "Cancelling a workflow run deletes nothing"
+added_at = "2026-11-09T00:00:00Z"
+
+# Deleting a branch through the API, same as git push origin --delete (owner, 2026-11-02).
+[[allow]]
+pattern = '^gh api (?:-X ?DELETE|--method[ =]DELETE) repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/git/refs/heads/[A-Za-z0-9._/-]+$'
+reason = "Deleting a branch ref is routine after a merge (owner, 2026-11-02)"
+risk_acknowledged = true
+added_at = "2026-11-09T00:00:00Z"
+
+[[allow]]
+pattern = '^gh api repos/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/git/refs/heads/[A-Za-z0-9._/-]+ (?:-X ?DELETE|--method[ =]DELETE)$'
+reason = "Deleting a branch ref is routine after a merge (owner, 2026-11-02)"
+risk_acknowledged = true
+added_at = "2026-11-09T00:00:00Z"

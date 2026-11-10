@@ -1,0 +1,8 @@
+# Destructive command guard (dcg) for Codex. Codex asks you to trust a new
+# hook once: run /hooks in Codex after install.sh adds or changes this block.
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/home/natkins/.local/bin/dcg"

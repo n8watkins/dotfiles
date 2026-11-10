@@ -1,0 +1,32 @@
+# Runs the guard tests: the git confirmation hook and the dcg rule pack.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DCG_VERSION: v0.16.0
+      DCG_SHA256: e7d860eba7f99cb5d5535b00942196aae3d6ca22ec049491d74c97aab556b642
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install dcg
+        run: |
+          f=dcg-x86_64-unknown-linux-musl.tar.xz
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/Dicklesworthstone/destructive_command_guard/releases/download/$DCG_VERSION/$f"
+          echo "$DCG_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP"
+          echo "DCG_BIN=$RUNNER_TEMP/dcg" >> "$GITHUB_ENV"
+      - name: Git confirmation hook
+        run: bash home/.claude/hooks/confirm-destructive-git.test.sh
+      - name: dcg rule pack
+        run: bash home/.config/dcg/packs/n8.test.sh

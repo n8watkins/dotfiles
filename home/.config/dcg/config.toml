@@ -1,0 +1,30 @@
+# dcg (destructive command guard) settings. Linked to ~/.config/dcg/config.toml.
+# Hook entries live in home/.claude/settings.json (Claude) and in
+# ~/.codex/hooks.json (Codex, written by install.sh).
+# README.md "Destructive command guard" explains how to override a block.
+
+[general]
+color = "never"
+# Never rewrite agent settings on its own; install.sh and dotfiles own them.
+self_heal_hook = false
+check_updates = false
+# Block, rather than allow, when the hook payload cannot be read.
+fail_closed = true
+unverified_decision = "deny"
+
+[packs]
+enabled = [
+  "database.sqlite",
+  "database.postgresql",
+  "database.supabase",
+  "cdn.cloudflare_workers",
+  "platform.github",
+  "cicd.github_actions",
+  "package_managers",
+]
+custom_paths = ["~/.config/dcg/packs/*.yaml"]
+
+[policy]
+# Every match blocks, also for rules that would only warn by default.
+# "ask" is avoided: in bypass mode it is unclear whether Claude Code asks.
+default_mode = "deny"

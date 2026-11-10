@@ -9,10 +9,11 @@ How my coding agents (Claude Code and Codex) are set up: the rules every session
 | `home/AGENTS.md` | The short rules every agent reads at the start of every session. | `~/AGENTS.md`, linked as `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` |
 | `skills/` | Playbooks: step-by-step procedures an agent loads only when the situation comes up. | `~/.agents/skills/`, linked into `~/.claude/skills/` and `~/.codex/skills/` |
 | `home/.claude/settings.json` | Claude Code settings: permission prompts, hooks, status line. | Copied to `~/.claude/settings.json` |
-| `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). Tests: `confirm-destructive-git.test.sh`. | `~/.claude/hooks/` |
+| `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env`/`hushkey` `run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). It also asks before `--no-mask`, restic, the Hushkey backup files, unit and script, Windows Hello unlocks and helper runs, R2 bucket deletes and lock changes, and releases (v* tags, `gh release`, publish, release scripts). Tests: `confirm-destructive-git.test.sh`, which also checks the settings.json permission rules. | `~/.claude/hooks/` |
 | `bin/` | `trash` (move instead of delete) and `agent-lock` (the config lock). | `~/.local/bin/` |
 | `home/.config/dcg/` | Destructive command guard settings, exceptions and the `n8` rule pack for my databases and hosts. | `~/.config/dcg/` |
 | `home/.codex/config.hooks.toml` | The dcg hook for Codex. | A marked block inside `~/.codex/config.toml` |
+| `home/.codex/rules/guardrails.rules` | Codex command rules mirroring the Claude permission rules where a fixed command prefix can express them. Tests: `guardrails.test.sh`. | `~/.codex/rules/guardrails.rules` |
 | `home/.npmrc`, `home/.config/pnpm/config.yaml` | Install cooldown: npm and pnpm only pick package versions published at least 3 days ago. | A marked block inside `~/.npmrc` and `~/.config/pnpm/config.yaml` |
 | `home/.config/agent-hooks/` | Hooks shared by Claude and Codex (keep `AGENTS.md` as the real file, remind to commit). | `~/.config/agent-hooks/` |
 

@@ -42,6 +42,9 @@ link home/.claude/hooks/confirm-destructive-git.sh "$HOME/.claude/hooks/confirm-
 # Codex keeps hooks in config.toml next to settings it rewrites itself, so this
 # repo owns only a marked block in it.
 block home/.codex/config.hooks.toml "$HOME/.codex/config.toml"
+# Codex command rules (secrets, backup, Hello, releases). Codex reads every
+# .rules file in ~/.codex/rules and writes its own approvals to default.rules.
+link home/.codex/rules/guardrails.rules "$HOME/.codex/rules/guardrails.rules"
 
 # Destructive command guard (dcg): settings, exceptions and the n8 rule pack.
 link home/.config/dcg/config.toml "$HOME/.config/dcg/config.toml"

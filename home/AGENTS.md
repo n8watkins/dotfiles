@@ -23,6 +23,7 @@
 - When the user shares a screenshot or says "check my screenshot", read the most recent file from the Screenshots path above
 - Secrets live in `pass`, used only through `pass-env`; you know them by name (`shared/GEMINI_API_KEY`), never by value. Never open `.env*`, `.dev.vars`, `~/.password-store` or `~/.gnupg`, never print secret variables, never ask the owner to paste a key into chat, and never work around a denied command.
 - Each project lists its secrets by name in `.env.pass`. Run with `pass-env run -- <command>`, send one key with `pass-env pipe <entry> -- <command reading stdin>`, check with `pass-env check`; run and pipe go through for the known deploy and test tools and `gh secret set`, and ask the owner for anything else. Create keys we control with `pass-env generate <entry>`; for provider-issued keys ask the owner to run `! pass-env set <entry>`. If you see LOCKED, ask the owner to run `! pass-env unlock`.
+- When dcg, a hook or a permission rule blocks or denies a command, stop and report it (to the owner, or to the agent that started you): the command, the message, and what you were trying to do. Never retry it in another form (another tool, a script, an interpreter, a full path, a wrapper), including a "safer" form the block message itself suggests, until the owner says how to proceed.
 
 ## Maintaining this file
 

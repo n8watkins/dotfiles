@@ -56,6 +56,10 @@ SAFETY = [
     "file:~/.local/bin/agent-lock",
 ]
 SAFETY_LIST = "agent-lock:safety-list"
+# The rule lists in a repo's .claude/settings*.json `permissions` that Claude Code
+# writes when the owner answers a prompt. Project rules cannot outrank the user's:
+# deny and ask rules win over allow rules from any scope, and hooks still run.
+PERMISSION_RULES = ("allow", "ask", "deny", "additionalDirectories")
 PROJECT_FILES = [".claude/settings.json", ".claude/settings.local.json", ".mcp.json",
                  ".vscode/tasks.json", ".codex/config.toml"]
 
@@ -179,12 +183,29 @@ def collect(project: Path | None = None) -> dict:
             path = project / rel
             if path.is_file():
                 data = read_json(path) if path.suffix == ".json" else None
+                name = f"project:{project}/{rel}"
                 if rel.startswith(".claude/") and isinstance(data, dict):
-                    value = {k: data[k] for k in CLAUDE_KEYS if k in data}
+                    # One item per key, so the config-change hook can tell a permission
+                    # rule from a hook. Only the rule lists share the `permissions` item;
+                    # the mode and every other permissions setting are items of their own.
+                    for key in CLAUDE_KEYS:
+                        if key not in data:
+                            continue
+                        value = data[key]
+                        if key == "permissions" and isinstance(value, dict):
+                            rules = {k: v for k, v in value.items() if k in PERMISSION_RULES}
+                            if rules:
+                                add(f"{name}:permissions", rules, path)
+                            for k, v in value.items():
+                                if k not in PERMISSION_RULES:
+                                    add(f"{name}:permissions.{k}", v, path)
+                        else:
+                            add(f"{name}:{key}", value, path)
+                elif rel.startswith(".claude/"):
+                    add(name, file_print(path), path)  # not a JSON object: held as a whole
                 else:
-                    value = file_print(path)
-                add(f"project:{project}/{rel}", value, path,
-                    names_only((data or {}).get("mcpServers")) if rel == ".mcp.json" else "")
+                    add(name, file_print(path), path,
+                        names_only((data or {}).get("mcpServers")) if rel == ".mcp.json" else "")
     return items
 
 
@@ -360,8 +381,9 @@ def hook(event: str) -> int:
     if event == "claude-config-change":
         # Claude Code shows no message for this event, so an unapproved change
         # that makes the agent run something is kept out of the running session.
-        # The next session start reports it. Permission changes are let through:
-        # the owner makes those from the prompt.
+        # The next session start reports it. Permission rule changes are let
+        # through: the owner makes those from the prompt. A repo's permission mode
+        # and other permissions settings are separate items and stay held.
         source = payload.get("source", "")
         if source == "user_settings":
             prefix = tuple(f"claude/settings.json:{k}" for k in CLAUDE_KEYS if k != "permissions")
@@ -373,7 +395,8 @@ def hook(event: str) -> int:
             return 0
         changes, _ = compare(project_root(cwd), prefix)
         if source in ("project_settings", "local_settings"):
-            changes = [c for c in changes if not c.endswith(":permissions")]
+            rules = tuple(f"/{rel}:permissions" for rel in PROJECT_FILES if rel.startswith(".claude/"))
+            changes = [c for c in changes if not c.endswith(rules)]
         if changes:
             STATE.mkdir(parents=True, exist_ok=True)
             with open(STATE / "blocked.log", "a") as log:

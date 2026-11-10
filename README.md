@@ -52,7 +52,7 @@ It blocks rather than asks, also in bypass mode, and tells the agent to stop and
 | `home/.config/dcg/allowlist.toml` | Exceptions: `git branch -D`, `rm -rf` of build folders (`node_modules`, `dist`, `.next` and similar), branch deletes through the API, cancelling a CI run, and the GitHub deletes that `confirm-destructive-git.sh` and the `ask` rules already confirm with me. |
 | `home/.config/dcg/packs/n8.test.sh` | Tests through the same hook payload Claude Code sends, in bypass mode. CI runs them. |
 
-`confirm-destructive-git.sh` keeps doing its job next to dcg: it asks about GitHub deletes, secrets, login permissions, force pushes and secrets handed to commands outside the known deploy and test tools.
+`confirm-destructive-git.sh` keeps doing its job next to dcg: it asks about GitHub deletes, Actions secrets, login permissions, force pushes, and secrets handed to commands outside the known deploy and test tools.
 When both answer, the stricter answer wins.
 
 To override a block (owner only):

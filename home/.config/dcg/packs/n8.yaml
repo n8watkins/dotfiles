@@ -17,6 +17,7 @@ keywords:
   - prisma
   - vercel
   - dcg
+  - agent-lock
 
 denial_banner: Blocked - this needs the owner's OK
 denial_trailer: >-
@@ -95,3 +96,9 @@ destructive_patterns:
     severity: critical
     description: Lifting, changing or removing dcg's blocks is the owner's call, not an agent's
     explanation: The owner can approve a blocked command himself, for example with ! dcg allow-once <code> in the prompt.
+
+  - name: agent-lock-approve
+    pattern: '\bagent-lock\s+approve\b'
+    severity: critical
+    description: Approving agent config changes is the owner's call, not an agent's
+    explanation: Tell the owner what changed (agent-lock check) and let him run ! agent-lock approve himself.

@@ -1,8 +1,17 @@
-# Destructive command guard (dcg) for Codex. Codex asks you to trust a new
-# hook once: run /hooks in Codex after install.sh adds or changes this block.
+# Codex hooks from dotfiles. Codex asks you to trust a new or changed hook
+# once: run /hooks in Codex after install.sh adds or changes this block.
+
+# Destructive command guard (dcg).
 [[hooks.PreToolUse]]
 matcher = "Bash"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
 command = "/home/natkins/.local/bin/dcg"
+
+# Config lock: report agent config changes the owner has not approved.
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/home/natkins/.local/bin/agent-lock hook codex-session-start"

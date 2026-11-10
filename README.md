@@ -47,8 +47,8 @@ It blocks rather than asks, also in bypass mode, and tells the agent to stop and
 
 | File | What it does |
 | --- | --- |
-| `home/.config/dcg/config.toml` | Turns on the packs for SQLite, PostgreSQL, Supabase, Cloudflare Workers, GitHub, GitHub Actions and package registries; every match blocks. |
-| `home/.config/dcg/packs/n8.yaml` | Rules dcg lacks for my stack: D1 `execute` with DROP, DELETE or TRUNCATE or a remote `--file`, D1 time-travel restore, `turso db shell` destructive SQL, `turso db/group destroy`, `drizzle-kit push/drop`, `prisma migrate reset`, `prisma db push --force-reset/--accept-data-loss`, Vercel removes, and `dcg allow-once`/`allowlist add` so an agent cannot lift a block itself. |
+| `home/.config/dcg/config.toml` | Turns on the packs for SQLite, PostgreSQL, Supabase, Cloudflare Workers, GitHub and GitHub Actions; every match blocks. |
+| `home/.config/dcg/packs/n8.yaml` | Rules dcg lacks for my stack: D1 `execute` with DROP, DELETE or TRUNCATE or a remote `--file`, D1 time-travel restore, `turso db shell` destructive SQL, `turso db/group destroy`, `drizzle-kit push/drop`, `prisma migrate reset`, `prisma db push --force-reset/--accept-data-loss`, Vercel removes, unpublishing a package, `agent-lock approve`, and `dcg allow-once`/`allowlist add` so an agent cannot lift a block itself. |
 | `home/.config/dcg/allowlist.toml` | Exceptions: `git branch -D`, `rm -rf` of build folders (`node_modules`, `dist`, `.next` and similar), branch deletes through the API, cancelling a CI run, and the GitHub deletes that `confirm-destructive-git.sh` and the `ask` rules already confirm with me. |
 | `home/.config/dcg/packs/n8.test.sh` | Tests through the same hook payload Claude Code sends, in bypass mode. CI runs them. |
 

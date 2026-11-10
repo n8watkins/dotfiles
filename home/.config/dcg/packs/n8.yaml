@@ -18,6 +18,7 @@ keywords:
   - vercel
   - dcg
   - agent-lock
+  - unpublish
 
 denial_banner: Blocked - this needs the owner's OK
 denial_trailer: >-
@@ -89,6 +90,14 @@ destructive_patterns:
     severity: critical
     description: removes a Vercel project, environment variable, domain, DNS record, alias or blob
     explanation: Only the owner removes Vercel projects, settings or domains.
+
+  # Package registries. dcg's package_managers pack also blocks routine
+  # removals (pip uninstall, brew uninstall), so only this rule is kept.
+  - name: npm-unpublish
+    pattern: '\b(?:npm|pnpm|yarn)\b[^;&|\n]*\bunpublish\b'
+    severity: critical
+    description: Unpublishing removes a released package version for everyone who depends on it
+    explanation: Deprecate the version instead (npm deprecate), or ask the owner.
 
   # dcg itself: only the owner lifts a block.
   - name: dcg-self-bypass

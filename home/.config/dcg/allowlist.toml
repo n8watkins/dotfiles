@@ -13,6 +13,23 @@ reason = "Build output and dependency folders are rebuilt on demand"
 risk_acknowledged = true
 added_at = "2026-11-09T00:00:00Z"
 
+# git mv of a loop variable to a literal destination: git only moves tracked
+# files inside the repo and refuses to overwrite without -f, so a rename is
+# undone with git. dcg's mv-dynamic-path rule cannot tell git mv from mv.
+# The pattern covers the whole command, so a chain with anything else still
+# goes through every rule (owner, 2026-11-10).
+[[allow]]
+pattern = '^git\s+mv\s+(?:-[nvk]\s+)*"\$\{?\w+\}?"\s+[A-Za-z0-9._/@+][A-Za-z0-9._/@+-]*$'
+reason = "git mv only renames tracked files and refuses to overwrite without -f"
+risk_acknowledged = true
+added_at = "2026-11-10T00:00:00Z"
+
+[[allow]]
+pattern = '^for\s+\w+\s+in\s+[A-Za-z0-9._/@*+ -]+;\s*do\s+git\s+mv\s+(?:-[nvk]\s+)*"\$\{?\w+\}?"\s+[A-Za-z0-9._/@+][A-Za-z0-9._/@+-]*;\s*done$'
+reason = "git mv only renames tracked files and refuses to overwrite without -f"
+risk_acknowledged = true
+added_at = "2026-11-10T00:00:00Z"
+
 # GitHub commands the owner wants to confirm, not have blocked: the github-access
 # playbook runs them and the owner approves the prompt. The "ask" rules in
 # settings.json prompt for these even in bypass mode, and

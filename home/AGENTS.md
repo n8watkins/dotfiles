@@ -23,7 +23,18 @@
 - When the user shares a screenshot or says "check my screenshot", read the most recent file from the Screenshots path above
 - Secrets live in `pass`, used only through `pass-env`; you know them by name (`shared/GEMINI_API_KEY`), never by value. Never open `.env*`, `.dev.vars`, `~/.password-store` or `~/.gnupg`, never print secret variables, never ask the owner to paste a key into chat, and never work around a denied command.
 - Each project lists its secrets by name in `.env.pass`. Run with `pass-env run -- <command>`, send one key with `pass-env pipe <entry> -- <command reading stdin>`, check with `pass-env check`; run and pipe go through for the known deploy and test tools and `gh secret set`, and ask the owner for anything else. Create keys we control with `pass-env generate <entry>`; for provider-issued keys ask the owner to run `! pass-env set <entry>`. If you see LOCKED, ask the owner to run `! pass-env unlock`.
-- When dcg, a hook or a permission rule blocks or denies a command, stop and report it (to the owner, or to the agent that started you): the command, the message, and what you were trying to do. Never retry it in another form (another tool, a script, an interpreter, a full path, a wrapper), including a "safer" form the block message itself suggests, until the owner says how to proceed.
+- When dcg, a hook or a permission rule blocks or denies a command, decide whether the block is about the effect or only the method.
+  - Effect (a real block): the command deletes data, publishes or releases, reveals or moves a secret, changes permissions or access, or touches the secrets store, backups or Windows Hello.
+    Stop and report it (to the owner, or to the agent that started you): the command, the message, and what you were trying to do.
+    Never retry it in another form (another tool, a script, an interpreter, a full path, a wrapper), including a "safer" form the block message itself suggests, until the owner says how to proceed.
+  - Method: the action is harmless and only the way it was run tripped the guard.
+    Do it with the dedicated tool instead, and say in your report what was blocked and what you used.
+    Edit or create a file with the Edit or Write tool, not a shell heredoc or script.
+    Send output to a literal path in the scratchpad, not a redirect to a path built from a variable.
+    Read a file with the Read tool and search with the Grep tool, not a shell command.
+    Put long PR or commit text in a file written with Write and pass it with `--body-file` or `-F`.
+  - Never use a different method to get an effect that was blocked, and never run `agent-lock approve` or `dcg allow-once`.
+    When unsure which kind a block is, treat it as a real block.
 
 ## Maintaining this file
 

@@ -104,6 +104,79 @@ expect allow 'git branch -D feat/old-branch'
 expect allow 'rm -rf node_modules'
 expect allow 'rm -rf ./dist .next'
 expect allow 'rm -rf /tmp/claude-1000/scratch/build'
+
+# False alarms from 2026-11-10, now passing (owner, 2026-11-10).
+# 1. Heredoc text naming Windows launchers, written to a file or held in a
+#    Python string, is not run. (A Python file edit whose strings dcg cannot
+#    parse still blocks; agents use the Edit tool for those, see AGENTS.md.)
+expect allow $'cat > notes.md <<\'EOF\'\nRun cmd.exe /c dir or powershell.exe -NoProfile -Command Get-Date.\nEOF'
+expect allow $'python3 - <<\'EOF\'\nfrom pathlib import Path\nPath("notes.md").write_text("run cmd.exe /c dir or powershell.exe -NoProfile")\nEOF'
+# 2. Text that only mentions agent-lock approve or dcg allow-once.
+expect allow $'python3 -I - x.html <<\'EOF\'\ns = open("x.html").read()\ns = s.replace("a", "<li>Never run agent-lock approve yourself; the owner does.</li>")\nopen("x.html", "w").write(s)\nEOF'
+expect allow $'cat > notes.md <<\'EOF\'\nThe owner runs agent-lock approve, or dcg allow-once with the code.\nEOF'
+expect allow 'codex exec "Run exactly this, then report: dcg test git status. Do not run dcg allow-once."'
+expect allow "gh pr create --title x --body 'agent-lock reports it; the owner runs agent-lock approve'"
+# 3. Build caches, in a worktree by full path or by name inside a longer command.
+expect allow 'rm -rf .next && npm run build'
+expect allow 'cd ~/n8builds/worktrees/app && rm -rf .next node_modules/.cache && npm test'
+expect allow 'rm -rf ./node_modules/.cache'
+expect allow 'rm -rf playwright-report test-results coverage'
+expect allow 'rm -rf ~/n8builds/worktrees/app/.next'
+expect allow 'rm -rf ~/n8builds/worktrees/app/apps/web/.next ~/n8builds/worktrees/app/.turbo'
+expect allow 'rm -rf ~/projects/worktrees/dotfiles-x/dist ~/projects/worktrees/dotfiles-x/test-results'
+expect allow 'rm -r ~/projects/worktrees/dotfiles-x/coverage'
+# 6. git mv of a loop variable to a literal folder.
+expect allow 'for f in public/builds/dev-portfolio/*; do git mv "$f" public/builds/portfolio/; done'
+expect allow 'git mv "$f" docs/'
+# Still blocked: real deletes, and the commands that lift a block.
+expect deny  'rm -rf ~'
+expect deny  'rm -rf .next src'
+expect deny  'rm -rf .next && rm -rf src'
+expect deny  'cd ~/n8builds/worktrees/app && rm -rf src'
+expect deny  'rm -rf ~/n8builds/worktrees/app'
+expect deny  'rm -rf ~/n8builds/worktrees/app/src'
+expect deny  'rm -rf ~/n8builds/worktrees/*'
+expect deny  'rm -rf ~/n8builds/worktrees/*/.next'
+expect deny  'rm -rf ~/n8builds/worktrees/app/.next/..'
+expect deny  'rm -rf ~/n8builds/worktrees/app/../../projects'
+expect deny  'rm -rf ~/n8builds/worktrees/app/.next/../src'
+expect deny  'rm -rf ~/projects/app/.next'
+expect deny  'rm -rf ~/n8builds/app/dist'
+expect deny  'rm -rf .next/../..'
+expect deny  'rm -r src'
+expect deny  'git push --force origin main'
+expect deny  'for f in $(ls); do git mv "$f" docs/; done; rm -rf src'
+expect deny  'git mv "$f" docs/ && git reset --hard'
+expect deny  $'bash <<\'EOF\'\necho "$(foo\nrm -rf ~/projects\nEOF'
+expect deny  $'python3 - <<\'EOF\'\nimport os\nos.system("rm -rf ~/projects")\nEOF'
+expect deny  $'cat > x.sh <<\'EOF\'\nrm -rf ~/projects\nEOF\nbash x.sh'
+expect deny  'cd /tmp && agent-lock approve'
+expect deny  '~/.local/bin/agent-lock approve'
+expect deny  'sudo agent-lock approve'
+expect deny  'timeout 5 agent-lock approve'
+expect deny  'x=$(agent-lock approve)'
+expect deny  'echo `agent-lock approve`'
+expect deny  '(agent-lock approve)'
+expect deny  '{ agent-lock approve; }'
+expect deny  'if true; then agent-lock approve; fi'
+expect deny  'for i in 1; do agent-lock approve; done'
+expect deny  "bash -c 'agent-lock approve'"
+expect deny  $'bash <<\'EOF\'\nagent-lock approve\nEOF'
+expect deny  $'python3 - <<\'EOF\'\nimport subprocess\nsubprocess.run(["agent-lock", "approve"])\nEOF'
+expect deny  'echo y | xargs agent-lock approve'
+expect deny  'find . -maxdepth 0 -exec agent-lock approve \;'
+expect deny  "pwsh -c 'wsl agent-lock approve'"
+expect deny  "agent-lock 'approve'"
+expect deny  $'x=1\nagent-lock approve'
+expect deny  '(dcg allow-once 1)'
+expect deny  'echo 1 | xargs dcg allow-once'
+expect deny  "python3 -c \"import os; os.system('dcg allow-once 1')\""
+expect deny  'dcg allowlist add-command "git reset --hard"'
+# Method blocks that stay: a redirect to a path built from a variable at run
+# time. Agents write to a literal scratchpad path instead (AGENTS.md).
+expect deny  'log="$SCRATCH/test.log"; npm test > "$log" 2>&1'
+expect allow 'npm test > /tmp/claude-1000/scratchpad/test.log 2>&1'
+
 # GitHub: the deletes the owner confirms are left to settings.json ask rules
 # and confirm-destructive-git.sh; dcg blocks the rest.
 expect allow 'gh repo delete n8watkins/app --yes'

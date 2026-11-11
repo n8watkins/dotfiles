@@ -17,6 +17,7 @@ description: Use when squash-merging a pull request, especially in a release-kit
 
 1. Remove the PR's worktree (`git worktree remove <path>`) and delete the local branch; make sure the remote branch is deleted (`--delete-branch`).
 2. Stop dev servers and test servers you started, including orphans whose working directory is a deleted worktree.
+   Stop any browser you started for testing: `npx -y chrome-devtools-axi stop` (its bridge and headless Chrome otherwise stay alive for days; twelve left over held about 4 GB on 2026-11-11).
 3. While parallel lanes run, watch memory (`free -h`) and stay inside the machine's limits.
 4. Mention in the summary what was removed.
 
@@ -27,5 +28,6 @@ A worktree is a full copy of the repo plus its own `node_modules` and build cach
 - Before you report a lane as done, make sure its work is on GitHub (committed and pushed, or in a PR), then remove its worktree, even when the PR stays open for the owner's review or was closed. Reviewing or reopening only needs the branch on GitHub; a fresh worktree can be made later.
 - Delete the local branch once its tip is on GitHub (`git branch -r --contains <sha>` shows a remote branch, or the PR merged).
 - Keep a worktree only when it holds uncommitted or unpushed work, and say so in the report with its path.
+- Stop the dev servers and the test browser (`npx -y chrome-devtools-axi stop`) the lane started.
 - Remove a worktree's folder with `trash <path>` and then `git worktree prune`, so a mistake can still be restored for 14 days.
 - Build output (`.next`, `.open-next`, `.turbo`) in a checkout you keep is cache: trash it when a lane is done with it. Keep `node_modules` and `.wrangler` (local dev databases).

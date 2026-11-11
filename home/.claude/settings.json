@@ -11,7 +11,10 @@
       "Bash(git worktree remove:*)",
       "Bash(git worktree prune:*)",
       "Bash(git branch -d:*)",
-      "Bash(git branch -D:*)"
+      "Bash(git branch -D:*)",
+      "Bash(vibe today:*)",
+      "Bash(vibe week:*)",
+      "Bash(vibe standup:*)"
     ],
     "ask": [
       "Bash(gh repo delete:*)",
@@ -347,6 +350,7 @@
       "Bash(gh api *--input*rulesets*)"
     ]
   },
+  "cleanupPeriodDays": 90,
   "hooks": {
     "PreToolUse": [
       {

@@ -25,14 +25,31 @@ esac
 
 cd "$dir" 2>/dev/null || exit 0
 
+# A CLAUDE.md link this hook added must not make the repo look changed: an
+# untracked file makes the checkout "dirty", so storage cleanup skips its build
+# output and agents may commit the link by accident. List an untracked link in
+# the repo's local, never-committed ignore file (.git/info/exclude). Leaves
+# tracked links and non-git folders alone.
+exclude_link() {
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  git ls-files --error-unmatch -- CLAUDE.md >/dev/null 2>&1 && return 0
+  local exclude entry
+  exclude="$(git rev-parse --git-path info/exclude)" || return 0
+  entry="/$(git rev-parse --show-prefix)CLAUDE.md"
+  mkdir -p "$(dirname "$exclude")"
+  grep -qxF -- "$entry" "$exclude" 2>/dev/null || printf '%s\n' "$entry" >>"$exclude"
+}
+
 # Already correct: CLAUDE.md is a symlink pointing at AGENTS.md.
 if [ -L CLAUDE.md ] && [ "$(readlink CLAUDE.md)" = "AGENTS.md" ]; then
+  exclude_link
   exit 0
 fi
 
 # AGENTS.md exists as a real file, no CLAUDE.md yet -> just add the symlink.
 if [ -f AGENTS.md ] && [ ! -L AGENTS.md ] && [ ! -e CLAUDE.md ]; then
   ln -s AGENTS.md CLAUDE.md
+  exclude_link
   exit 0
 fi
 

@@ -155,7 +155,6 @@
       "Edit(~/.config/systemd/user/hushkey-backup*)",
       "Edit(~/.local/bin/hushkey-backup*)",
       "Edit(~/dotfiles/bin/hushkey-backup*)",
-      "Edit(~/projects/dotfiles/bin/hushkey-backup*)",
       "Edit(//mnt/c/Users/natha/AppData/Local/pass-env/**)",
       "Edit(//mnt/c/Users/natha/AppData/Local/hushkey/**)",
       "Bash(cat *.config/hushkey*)",

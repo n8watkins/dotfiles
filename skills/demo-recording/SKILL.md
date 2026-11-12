@@ -1,6 +1,6 @@
 ---
 name: demo-recording
-description: Use when recording, re-recording or reviewing an automated product demo clip (Playwright) of one of the owner's Chrome extensions or web apps, for a build page, homepage card, store listing or README. Covers the demo-kit pipeline (~/projects/demo-kit), pre-flight (latest build, throwaway profile, fixtures), camera and cursor rules, the storyboard, the review checklist and past mistakes.
+description: Use when recording, re-recording or reviewing an automated product demo clip (Playwright) of one of the owner's Chrome extensions or web apps, for a build page, homepage card, store listing or README. Covers the demo-kit pipeline (~/projects/tools/demo-kit), pre-flight (latest build, throwaway profile, fixtures), camera and cursor rules, the storyboard, the review checklist and past mistakes.
 ---
 
 # Recording product demo clips
@@ -8,12 +8,12 @@ description: Use when recording, re-recording or reviewing an automated product 
 Version 1.1, 2026-11-09.
 Written after the owner's critique of the first extension clips (TL;DW, VoiceDock, TubeVault) on 2026-11-09.
 
-**The pipeline is demo-kit:** https://github.com/n8watkins/demo-kit, local clone `~/projects/demo-kit`.
+**The pipeline is demo-kit:** https://github.com/n8watkins/demo-kit, local clone `~/projects/tools/demo-kit`.
 Every new or re-recorded clip is a storyboard file in `demo-kit/storyboards/<product>.ts`, recorded and rendered with its CLI; its README has the API, the commands and troubleshooting.
 The older scripts in n8builds-web (`scripts/product-clips/`, `scripts/scribe-tour/`) made the 2026-11-09 clips and are not used for new ones.
 
 ```bash
-cd ~/projects/demo-kit
+cd ~/projects/tools/demo-kit
 demo-kit record storyboards/<product>.ts --expect <repo>@origin/<default>   # pre-flight, then the take
 demo-kit plan takes/<take> --strict                                         # camera plan; fix the storyboard until the desktop plan has no warnings
 demo-kit render takes/<take>                                                # desktop 1280x800 + phone 390x760: .mp4, .webm, -poster.webp

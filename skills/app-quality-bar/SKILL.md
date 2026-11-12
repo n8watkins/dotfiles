@@ -298,7 +298,7 @@ Full grades and evidence: `APP_SCORECARD.md` in the private `secret-handling-rev
 - Accounts exist but there is no privacy page or Delete account; screenshot URLs 404 in the console.
 - Keyboard voting (arrows and S) exists but is not shown anywhere.
 
-### KeysReady (`~/projects/keysready`, https://app.keysready.n8builds.dev)
+### KeysReady (`~/projects/backlog/keysready`, https://app.keysready.n8builds.dev)
 
 - `app.` serves the marketing page; shops and drivers sign in on separate `/login` pages.
 - Em dashes in the title, manifest name and hero copy; system font; an auto-rotating hero card.

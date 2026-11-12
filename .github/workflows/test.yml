@@ -33,6 +33,8 @@ jobs:
         run: bash home/.config/dcg/packs/n8.test.sh
       - name: Config lock
         run: bash bin/agent-lock.test.sh
+      - name: AGENTS.md / CLAUDE.md normalizer
+        run: bash home/.config/agent-hooks/normalize-agents-md.test.sh
       - name: Install Codex (for its rule matcher)
         run: npm install --global @openai/codex@0.163.0
       - name: Codex command rules

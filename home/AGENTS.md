@@ -15,6 +15,7 @@
 - Next.js: dev servers and test stacks run on Turbopack. Never add `--webpack` to `next dev` and never cap the heap with `NODE_OPTIONS=--max-old-space-size`; if something seems to need webpack, find out why first.
 - Security alerts on a transitive dependency: never force a new major with `overrides`/`resolutions`; the fix comes from updating the direct dependency that pulls it in. If no parent accepts the fix yet, dismiss the alert as "tolerable_risk" with a comment naming the blocking parent, and leave it to Dependabot's version updates.
 - Never delete with `rm -rf` (or `rm`) anything you did not create in this task: move it with `trash PATH` instead (dotfiles `bin/trash`, kept 14 days in `~/.local/share/agent-trash/<date>/`, restore with `mv`). This covers other agents' and earlier sessions' files, scratch folders you didn't make, worktrees, and anything in the owner's folders. Say what you trashed and where.
+- Put every git worktree you create in `~/worktrees/<repo>-<branch>`, never inside `~/projects` or next to the repo: `~/projects` holds only projects. (`~/n8builds` keeps its own `~/n8builds/worktrees`.)
 - To wait for a background job, use its completion notification, its exit code or a sentinel file. Never wait or kill with `pgrep -f`/`pkill -f` on a pattern that appears in your own command line: it matches itself.
 - WSL username is `natkins`, Windows username is `natha`
 - Windows C: drive is accessible from WSL at `/mnt/c/`

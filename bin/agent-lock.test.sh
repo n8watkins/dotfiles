@@ -5,7 +5,7 @@ set -euo pipefail
 lock="$(cd "$(dirname "$0")" && pwd)/agent-lock"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-export HOME="$tmp/home" AGENT_LOCK_STATE="$tmp/state" AGENT_LOCK_DOTFILES="$tmp/home/projects/dotfiles"
+export HOME="$tmp/home" AGENT_LOCK_STATE="$tmp/state" AGENT_LOCK_DOTFILES="$tmp/home/dotfiles"
 export GIT_CONFIG_GLOBAL="$tmp/gitconfig" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 df="$AGENT_LOCK_DOTFILES"
 mkdir -p "$HOME/.claude/skills" "$HOME/.codex" "$HOME/.local/bin" "$df/skills/demo" "$df/home/.claude" "$df/bin"

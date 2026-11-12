@@ -124,8 +124,8 @@ These files hold only settings.
 ## Install
 
 ```bash
-git clone https://github.com/n8watkins/dotfiles.git ~/projects/dotfiles
-~/projects/dotfiles/install.sh
+git clone https://github.com/n8watkins/dotfiles.git ~/dotfiles
+~/dotfiles/install.sh
 ```
 
 Existing files are moved aside to `<file>.pre-dotfiles` the first time.

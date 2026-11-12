@@ -246,7 +246,7 @@ The checklist covers sections 1-9 and 12-21.
 
 ## Known gaps (2026-11-04)
 
-### FitFlow 7 (`~/projects/public/fitflow7`, https://fitflow7.n8builds.dev)
+### FitFlow 7 (`~/projects/fitflow7`, https://fitflow7.n8builds.dev)
 
 - Nine top-level links in the desktop header (Workouts, Calendar, Stats, Challenges, Exercises, History, Insights, Community, Settings); phones hide four behind "More".
   Group into about four (Today, Plan with Calendar and Challenges, Progress with Stats, History and Insights, Library) plus Settings in the avatar menu.
@@ -286,7 +286,7 @@ Full grades and evidence: `APP_SCORECARD.md` in the private `secret-handling-rev
 - Light only; add the dark theme.
 - Desktop Lighthouse fails with NO_NAVSTART on `/`, which suggests a navigation during load; find it.
 
-### OpenPing (`~/projects/public/open-ping`, https://openping.n8builds.dev)
+### OpenPing (`~/projects/open-ping`, https://openping.n8builds.dev)
 
 - Eight sidebar destinations and a phone "More" menu (`src/client/components/AppLayout.tsx`); group to about five.
 - The app redirects to a `/login` page while the landing has a sign-in modal; use the modal everywhere.
@@ -298,12 +298,12 @@ Full grades and evidence: `APP_SCORECARD.md` in the private `secret-handling-rev
 - Accounts exist but there is no privacy page or Delete account; screenshot URLs 404 in the console.
 - Keyboard voting (arrows and S) exists but is not shown anywhere.
 
-### KeysReady (`~/projects/experiments/auto-repair-shop`, https://app.keysready.n8builds.dev)
+### KeysReady (`~/projects/keysready`, https://app.keysready.n8builds.dev)
 
 - `app.` serves the marketing page; shops and drivers sign in on separate `/login` pages.
 - Em dashes in the title, manifest name and hero copy; system font; an auto-rotating hero card.
 
-### Cutely Ask (`~/projects/polish/cutelyaskme`, https://cutelyaskme.nathancwatkins23.workers.dev)
+### Cutely Ask (`~/projects/cutelyaskme`, https://cutelyaskme.nathancwatkins23.workers.dev)
 
 - The 404 renders unstyled; the desktop home is a small card on an empty page.
 - One product, three names (Cutely Ask, Date Night, cutelyaskme), and an em dash in the title.

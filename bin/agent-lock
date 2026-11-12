@@ -30,7 +30,7 @@ from pathlib import Path
 HOME = Path(os.environ.get("HOME", str(Path.home())))
 STATE = Path(os.environ.get("AGENT_LOCK_STATE", HOME / ".local/state/agent-lock"))
 SNAPSHOT = STATE / "approved.json"
-DOTFILES = Path(os.environ.get("AGENT_LOCK_DOTFILES", HOME / "projects/dotfiles"))
+DOTFILES = Path(os.environ.get("AGENT_LOCK_DOTFILES", HOME / "dotfiles"))
 
 # settings.json keys that make Claude Code run or trust something.
 CLAUDE_KEYS = [

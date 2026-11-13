@@ -33,6 +33,10 @@ Only the description sits in an agent's context every session; the steps load wh
 | `writing` | Drafting anything published in my name; includes a draft `VOICE.md`. |
 | `app-quality-bar` | Building, redesigning or reviewing the UI/UX of one of my web apps. |
 | `demo-recording` | Recording or reviewing an automated product demo clip of an extension or web app. |
+| `handoff` | Handing work to a fresh session: a status file, a kickoff file, and a one-line prompt that names it. |
+| `agent-brief` | Writing the prompt for a build subagent, and running several at once. |
+| `owner-preview` | Building a page the owner picks options from; delivered hosted, for a phone. |
+| `publish-review` | Having a reviewer agent read every line of a page before it is published. |
 
 ## Rules for this repo
 

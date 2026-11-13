@@ -15,7 +15,8 @@ description: Use when squash-merging a pull request, especially in a release-kit
 
 ## After every merge
 
-1. Remove the PR's worktree (`git worktree remove <path>`) and delete the local branch; make sure the remote branch is deleted (`--delete-branch`).
+1. Remove the PR's worktree with `trash <path>` and then `git worktree prune` (the command guard blocks `git worktree remove`), and delete the local branch; make sure the remote branch is deleted.
+   Skip `--delete-branch` on `gh pr merge` when the default branch is checked out in another worktree: the merge succeeds but the local step fails.
 2. Stop dev servers and test servers you started, including orphans whose working directory is a deleted worktree.
    Stop any browser you started for testing: `npx -y chrome-devtools-axi stop` (its bridge and headless Chrome otherwise stay alive for days; twelve left over held about 4 GB on 2026-11-11).
 3. While parallel lanes run, watch memory (`free -h`) and stay inside the machine's limits.

@@ -10,7 +10,7 @@
 - Apply that same high standard to engineering excellence: lint, test failures, and test flakiness. If you see one, even if it is not caused by what you are working on right now, still get it fixed.
 - For one-off or infrequent operational work, start with the simplest direct end-to-end path. Do not build wrappers, control planes, policy layers or automation unless the direct path exposes a concrete blocker or a repeated need that justifies it.
 - Before using any harness feature that spawns a large swarm of subagents at once, explain the tradeoffs and ask the user for explicit approval.
-- For taste-driven or sweeping UI changes, show a quick desktop preview (then mobile) with a localhost link and screenshots, and get approval before full responsive work, tests and polish. Small, clear fixes skip the preview.
+- For taste-driven or sweeping UI changes, show a quick preview and get approval before full responsive work, tests and polish. The owner usually reviews on a phone, so deliver it as a hosted Artifact or on the live site behind a switch; a localhost link only works when they are at the PC. Small, clear fixes skip the preview. (Playbook: `owner-preview`.)
 - Deliver long reports, plans, status overviews and lists of decisions as a hosted HTML page (an Artifact) with a few lines plus the link in the terminal; keep quick updates and single questions in the terminal.
 - Next.js: dev servers and test stacks run on Turbopack. Never add `--webpack` to `next dev` and never cap the heap with `NODE_OPTIONS=--max-old-space-size`; if something seems to need webpack, find out why first.
 - Security alerts on a transitive dependency: never force a new major with `overrides`/`resolutions`; the fix comes from updating the direct dependency that pulls it in. If no parent accepts the fix yet, dismiss the alert as "tolerable_risk" with a comment naming the blocking parent, and leave it to Dependabot's version updates.
@@ -36,6 +36,12 @@
     Put long PR or commit text in a file written with Write and pass it with `--body-file` or `-F`.
   - Never use a different method to get an effect that was blocked, and never run `agent-lock approve` or `dcg allow-once`.
     When unsure which kind a block is, treat it as a real block.
+  - Shell habits the guard blocks, and what to do instead:
+    - Scripts: write them with Write to a scratchpad file and run `python3 -I <file>`; never pipe a heredoc into an interpreter or shell.
+    - Paths: write scratch paths out in full; never build one in a shell variable and redirect into it.
+    - Source edits: use Edit, never `sed -i` or `python3 -c`.
+    - Waiting: a background run and its notification, or a monitor with an until-loop; never `sleep N` and then read output.
+    - Restoring a file from git (`git checkout -- <file>`, `git restore`): ask the owner, or redo the change with Edit.
 
 ## Maintaining this file
 

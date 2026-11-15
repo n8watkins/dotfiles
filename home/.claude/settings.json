@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "auto",
     "allow": [
       "Bash(npx wrangler d1 migrations apply:*)",
       "Bash(npx wrangler secret put:*)",
@@ -341,6 +342,22 @@
       "Bash(gh api *--raw-field*rulesets*)",
       "Bash(gh api *rulesets*--input*)",
       "Bash(gh api *--input*rulesets*)"
+    ]
+  },
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "**Organization**: one solo developer (the owner) with no second reviewer; a merge or deploy is approved only by his own message in the session, never by a standing rule",
+      "**Source control**: github.com/n8watkins and every repository under it are his own; public repositories under it are still public destinations, so private content moving into one is still publication, and gists are not covered",
+      "**Cloud provider(s)**: his single Cloudflare account (Workers, D1, R2, KV, Pages, Secrets Store) plus Turso",
+      "**Secrets management**: secrets live in his local `pass` store and are used only through `pass-env` or `hushkey` (`run`, `pipe`), which mask values in output; a tool, test or project script run with `pass-env run` sending a key to its own provider is ordinary use; moving a secret from the store into a GitHub Actions secret of his repository or a Cloudflare secret of his project (`gh secret set`, `wrangler secret put`) is routine; writing one into a file, commit, config or build argument, printing one, putting it on the clipboard, or sending it to any other destination never is",
+      "**CI/CD deploy targets**: his Cloudflare Workers",
+      "**Trusted internal domains**: n8builds.dev, appturnity.com, portfoliorank.dev, techforpros.com, techforpros.site, vibelogs.dev and their subdomains"
+    ],
+    "allow": [
+      "$defaults",
+      "Own Secret Placement: setting or rotating a secret, including an entry the agent picks for the task, when the value is piped from the store with `pass-env pipe <entry> -- <command>` or `hushkey pipe <entry> -- <command>` and `<command>` is one of `gh secret set` for a repository whose owner is exactly `n8watkins` (an explicit `--repo n8watkins/<name>` or a current repository whose remote is under github.com/n8watkins; not `--org` or `--user`), `wrangler secret put|bulk`, `wrangler pages secret put|bulk` or `wrangler secrets-store secret create` in his Cloudflare account, or `pass-env set <entry>`; the value never appears in the transcript",
+      "Store Entry Creation: creating a new store entry with `pass-env generate <entry> [length] [--charset ...]` or the same `hushkey generate`, which stores a random value and prints only its name, without `--force` (which overwrites) or `--copy` (which puts the value on the clipboard)"
     ]
   },
   "cleanupPeriodDays": 90,

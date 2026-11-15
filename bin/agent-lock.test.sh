@@ -219,6 +219,16 @@ mkdir -p "$df/skills/demo/.staging" && echo x >"$df/skills/demo/.last-complete-r
 ok "the bookkeeping exception is for skills/synced only" '[[ "$(session)" == *"changed: skill:~/.claude/skills/demo"* ]]'
 rm -r "$df/skills/demo/.staging" "$df/skills/demo/.last-complete-round"
 "$lock" approve >/dev/null
+# Code a skill carries in __pycache__, node_modules or .git counts too.
+# (A skill outside dotfiles: git cannot see a nested .git, so a dotfiles one would match main.)
+own="$HOME/.claude/skills/own" && mkdir -p "$own" && echo "# own" >"$own/SKILL.md"
+"$lock" approve >/dev/null
+for d in __pycache__ node_modules .git; do
+  mkdir -p "$own/$d" && echo "swapped" >"$own/$d/x"
+  ok "a file in a skill's $d folder is reported" '[[ "$(session)" == *"changed: skill:~/.claude/skills/own"* ]]'
+  rm -r "$own/$d" && "$lock" approve >/dev/null
+done
+rm -r "$own" && "$lock" approve >/dev/null
 
 # A repo's own autoMode is safety-critical too (the classifier ignores it, but it is held).
 mkdir -p "$repo/.claude"

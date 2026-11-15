@@ -112,11 +112,12 @@ class SyncedSkills:
             return data  # not the shape we know: count it as it is
 
 
-def file_print(path: Path, rules=None):
+def file_print(path: Path, rules=None, skip_dirs=(".git", "node_modules", "__pycache__")):
     """Fingerprint of a file, or of every file in a folder (following links).
 
     rules.skip(rel_dir, name) -> True leaves that file out; rules.content(rel_dir,
-    name, data) returns the bytes that count for it.
+    name, data) returns the bytes that count for it. Folders named in skip_dirs
+    are left out (skills pass none: a swapped .pyc or module there is code).
     """
     if path.is_file():
         try:
@@ -127,7 +128,7 @@ def file_print(path: Path, rules=None):
         parts = []
         for root, dirs, files in os.walk(path, followlinks=True):
             rel = Path(root).relative_to(path)
-            dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules", "__pycache__"))
+            dirs[:] = sorted(d for d in dirs if d not in skip_dirs)
             for name in sorted(files):
                 if rules and rules.skip(rel, name):
                     continue
@@ -205,7 +206,7 @@ def collect(project: Path | None = None) -> dict:
             for s in sorted(folder.iterdir()):
                 if not s.name.startswith(".") and not s.name.endswith(".pre-dotfiles"):
                     rules = SyncedSkills if s == HOME / ".claude/skills/synced" else None
-                    add(f"skill:{tilde(s)}", file_print(s, rules), s)
+                    add(f"skill:{tilde(s)}", file_print(s, rules, skip_dirs=()), s)
 
     codex_path = HOME / ".codex/config.toml"
     try:

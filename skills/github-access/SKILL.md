@@ -20,4 +20,4 @@ Destructive commands also trigger a Claude Code confirmation prompt (`~/.claude/
 
 - Never add `delete_repo` permanently.
 - Tell the owner to answer confirmation prompts with option 1 (allow once) or 3 (no), never "don't ask again", which adds an allow rule that removes the guard.
-- Never print or commit token values; pipe secrets from `pass` (`pass show … | gh secret set NAME`).
+- Never print or commit token values; pipe secrets from the store (`pass-env pipe <entry> -- gh secret set NAME`).

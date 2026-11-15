@@ -6,8 +6,10 @@
 # Asks for: gh repo delete/archive, gh secret set/delete/remove, gh auth refresh
 # (changes the login's permissions), gh api DELETE calls, plain force pushes
 # (-f/--force/+refspec), --force-with-lease pushes to main or master, and
-# pass-env/hushkey run/pipe to anything but the known deploy and test tools (see
-# SAFE_SECRET_USES: inline code, script paths, interpreters and custom configs ask).
+# pass-env/hushkey run/pipe to anything but the known tools, project scripts and
+# secret sinks (see SAFE_SECRET_USES: inline code, scripts or configs outside the
+# project and interpreters reading stdin ask; in auto mode that one reason is
+# left to the classifier), and pass-env/hushkey generate --copy.
 # Hushkey (owner, 2026-11-10): run/pipe --no-mask, restic, the backup files,
 # unit and script, Windows Hello unlock and helper runs, destructive wrangler r2
 # commands, and releases (v* tags, gh release, publish, release scripts, gh api
@@ -245,9 +247,15 @@ def check_push(rest, git_dir):
 # pass-env run/pipe pass a secret without asking only to the known deploy and
 # test tools below, run the way the project defines them (owner, 2026-11-09 and
 # 2026-11-10). Anything that could run code the command line itself supplies
-# asks: inline code (node -e, python -c, npx -c), a script path, an interpreter,
-# a custom config, or an environment variable that injects code (NODE_OPTIONS,
-# PATH, ...). Printing forms are also blocked by deny rules in settings.json.
+# asks: inline code (node -e, python -c, npx -c), a script outside the project,
+# an interpreter reading stdin, a config outside the project, or an environment
+# variable that injects code (NODE_OPTIONS, PATH, ...). Printing forms are also
+# blocked by deny rules in settings.json.
+# Owner, 2026-11-15: stored secrets may be used by tools, tests and scripts in
+# his own projects without a prompt, as long as a secret never appears in the
+# chat. So `run` also allows whole CLIs of his own accounts and script files
+# inside the current git project (SCRIPT_RUNNERS below); `pipe` stays a short
+# list of commands that store the value somewhere (SECRET_SINKS).
 SAFE_SECRET_USES = [
     ["wrangler", "deploy"], ["wrangler", "secret", "put"], ["wrangler", "secret", "bulk"],
     ["wrangler", "d1", "migrations"], ["wrangler", "deployments"], ["wrangler", "versions"],
@@ -256,10 +264,35 @@ SAFE_SECRET_USES = [
     ["next", "dev"], ["next", "build"], ["next", "start"],
     ["playwright", "test"], ["vitest"],
 ]
-# Flags of those tools that load code or config from a path.
+# run only: whole CLIs. Destructive wrangler and gh subcommands are still caught
+# by wrangler_reason/check() here and by dcg, which run before this list.
+RUN_ONLY_USES = [
+    ["wrangler"], ["gh"], ["turso"], ["sentry-cli"], ["stripe"], ["tsc"], ["tauri"],
+    ["astro"], ["vite"], ["drizzle-kit", "generate"], ["drizzle-kit", "migrate"],
+    ["prisma", "migrate", "deploy"], ["prisma", "generate"], ["bun", "test"],
+]
+# pipe only: commands that read the value on stdin and store it.
+SECRET_SINKS = [
+    ["wrangler", "pages", "secret", "put"], ["wrangler", "pages", "secret", "bulk"],
+    ["wrangler", "secrets-store", "secret", "create"], ["docker", "login"],
+    ["flyctl", "secrets", "import"], ["fly", "secrets", "import"],
+    ["supabase", "secrets", "set"], ["convex", "env", "set"],
+]
+# Flags of those tools that load code or config from a path. -c/--config may
+# name a file inside the project (CONFIG_FLAGS); the rest always ask.
 CODE_FLAGS = {"-c", "--config", "-r", "--root", "--dir", "--setupFiles", "--globalSetup",
               "--globalTeardown", "--require", "--import", "--loader", "--environment",
-              "--pool", "--node-options"}
+              "--pool", "--node-options", "--preload"}
+CONFIG_FLAGS = {"-c", "--config"}
+# Interpreter flags allowed before a project script file.
+NODE_SCRIPT_FLAGS = {"--no-warnings", "--enable-source-maps"}
+PYTHON_SCRIPT_FLAGS = {"-I", "-u", "-B"}
+# python -m: a module in the project, or one of these test and migration runners.
+PYTHON_MODULES = {"pytest", "unittest", "alembic"}
+# Package-manager commands that are never a package.json script shorthand.
+PM_BUILTINS = {"exec", "dlx", "x", "create", "add", "install", "i", "remove", "rm", "update",
+               "up", "upgrade", "link", "publish", "config", "env", "setup", "self-update",
+               "patch", "node"}
 # Scoped npx packages that install one of the tools above.
 SCOPED_TOOLS = {"@opennextjs/cloudflare": "opennextjs-cloudflare", "@playwright/test": "playwright"}
 # Wrapper flags that only change prompting or output (npx, pnpm exec/dlx, npm exec).
@@ -316,7 +349,66 @@ def no_extra_npm_flags(a):
             return False
     return True
 
-def safe_secret_use(argv):
+def project_root(here):
+    try:
+        r = subprocess.run(["git", "-C", here, "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=3)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+def project_file(path, here):
+    """True if path names an existing file inside the git project at `here`.
+
+    No `..` component, no stdin (-), and after resolving symlinks the file must
+    sit in the repository or worktree that contains `here`.
+    """
+    if not path or path.startswith("-") or ".." in re.split(r"[/\\]", path):
+        return False
+    root = project_root(here)
+    if not root:
+        return False
+    full = os.path.realpath(os.path.join(here, os.path.expanduser(path)))
+    root = os.path.realpath(root)
+    return full.startswith(root + os.sep) and os.path.isfile(full)
+
+def package_scripts(here):
+    try:
+        with open(os.path.join(here, "package.json")) as f:
+            scripts = json.load(f).get("scripts") or {}
+        return set(scripts) if isinstance(scripts, dict) else set()
+    except Exception:
+        return set()
+
+def script_shorthand_ok(name, here):
+    """pnpm <script>, yarn <script>: a script package.json defines, not a builtin."""
+    return bool(SCRIPT_NAME.match(name)) and name not in PM_BUILTINS and name in package_scripts(here)
+
+def script_file_ok(a, here):
+    """node|tsx|python|python3 [safe flags] <project file> [args], python -m <module>."""
+    prog = a[0]
+    if prog in ("node", "nodejs", "tsx"):
+        allowed = NODE_SCRIPT_FLAGS if prog != "tsx" else set()
+    elif re.match(r"^python(3(\.[0-9]+)?)?$", prog):
+        allowed = PYTHON_SCRIPT_FLAGS
+    else:
+        return False
+    rest = a[1:]
+    while rest and rest[0].startswith("-") and rest[0] in allowed:
+        rest = rest[1:]
+    if not rest:
+        return False
+    if allowed is PYTHON_SCRIPT_FLAGS and rest[0] == "-m" and len(rest) > 1:
+        mod = rest[1]
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$", mod):
+            return False
+        top = mod.split(".")[0]
+        return top in PYTHON_MODULES or project_file(top + ".py", here) \
+            or project_file(os.path.join(top, "__init__.py"), here) \
+            or project_file(os.path.join(top, "__main__.py"), here)
+    return project_file(rest[0], here)
+
+def safe_secret_use(argv, mode="run", here="."):
     a = list(argv)
     # npx / bunx / pnpm exec / pnpm dlx / npm exec, with harmless flags only.
     while a and (os.path.basename(a[0]) in ("npx", "bunx") or a[:2] in (["pnpm", "exec"], ["pnpm", "dlx"], ["npm", "exec"])):
@@ -337,6 +429,7 @@ def safe_secret_use(argv):
             return False  # a script or a binary outside the project
         tool = os.path.basename(tool)
     a = [tool] + a[1:]
+    run = mode == "run"
     if tool == "npm":
         if len(a) >= 2 and a[1] in ("run", "run-script"):
             return script_run_ok(a[2:]) and no_extra_npm_flags(a[2:])
@@ -344,7 +437,21 @@ def safe_secret_use(argv):
     if tool == "pnpm":
         if len(a) >= 2 and a[1] == "run":
             return script_run_ok(a[2:])
+        if run and len(a) >= 2 and script_shorthand_ok(a[1], here):
+            return True
         return len(a) >= 2 and a[1] in ("test", "dev", "build", "start")
+    if run and tool == "yarn" and len(a) >= 2:
+        if a[1] == "run":
+            return script_run_ok(a[2:])
+        return script_shorthand_ok(a[1], here)
+    if run and tool == "bun" and a[1:2] == ["run"]:
+        # bun run <name> runs a script, a file or any package bin: only a
+        # script package.json defines, or a file inside the project.
+        rest = a[2:]
+        return bool(rest) and ((bool(SCRIPT_NAME.match(rest[0])) and rest[0] in package_scripts(here))
+                               or project_file(rest[0], here))
+    if run and script_file_ok(a, here):
+        return True
     if tool == "uv":
         if a[1:2] != ["run"]:
             return False
@@ -357,18 +464,27 @@ def safe_secret_use(argv):
                 a = a[1:] if "=" in a[0] else a[2:]
             else:
                 return False
+        if run and a and (project_file(a[0], here) or script_file_ok(a, here)):
+            return True  # uv run <project file>, uv run python <project file>
         # A named project command (pytest, alembic), not an interpreter or a file.
         return bool(a) and bool(SCRIPT_NAME.match(a[0])) and not INTERPRETER.match(a[0]) \
             and not re.search(r"\.(py|pyw|sh)$", a[0])
-    if not any(a[:len(p)] == p for p in SAFE_SECRET_USES):
+    if mode == "pipe" and a[:1] == ["docker"] and "--password-stdin" not in a:
+        return False
+    if tool == "wrangler" and "delete" in [x for x in a[1:] if not x.startswith("-")][:4]:
+        return False  # dcg misses some (wrangler secret delete): keep deletes off the list
+    uses = SAFE_SECRET_USES + (RUN_ONLY_USES if run else SECRET_SINKS)
+    if not any(a[:len(p)] == p for p in uses):
         return False
     for i, x in enumerate(a[1:], 1):
         f = flag_name(x)
+        value = x.split("=", 1)[1] if "=" in x else (a[i + 1] if i + 1 < len(a) else "")
         if f == "--reporter":
             # Built-in reporters (list, html, verbose) are fine; a path is code.
-            value = x.split("=", 1)[1] if "=" in x else (a[i + 1] if i + 1 < len(a) else "")
             if "/" in value or "." in value:
                 return False
+        elif f in CONFIG_FLAGS and run and project_file(value, here):
+            continue  # a config file inside the project
         elif f in CODE_FLAGS:
             return False
     if tool == "next":
@@ -385,6 +501,8 @@ def safe_secret_use(argv):
 
 # The secret tool under its old and new name (owner, 2026-11-10).
 SECRET_TOOLS = {"pass-env", "hushkey"}
+# The one reason auto mode may judge for itself (see the end of this script).
+NOT_SAFE = "gives a secret to a command that is not on the safe list"
 HELLO_HELPER = re.compile(r"(pass-env|hushkey)-hello(\.exe)?($|[\x27\" ])", re.I)
 WINDOWS_LAUNCHERS = {"cmd.exe", "cmd", "powershell.exe", "powershell", "pwsh.exe", "pwsh",
                      "wsl.exe", "explorer.exe", "rundll32.exe", "conhost.exe", "start"}
@@ -500,17 +618,22 @@ def check(argv, here):
         if "--no-mask" in (argv[:argv.index("--")] if "--" in argv else argv):
             return "turns off output masking for a secret"
         inner_u = unwrap(inner)
-        piped_secret = (argv[1] == "pipe" and len(inner_u) >= 3
-                        and os.path.basename(inner_u[0]) == "gh" and inner_u[1:3] == ["secret", "set"])
+        piped_secret = argv[1] == "pipe" and (
+            (len(inner_u) >= 3 and os.path.basename(inner_u[0]) == "gh" and inner_u[1:3] == ["secret", "set"])
+            # pass-env set <entry>: a value a CLI minted goes straight into the store.
+            or (len(inner_u) == 3 and os.path.basename(inner_u[0]) in SECRET_TOOLS
+                and inner_u[1] == "set" and not inner_u[2].startswith("-")))
         if not piped_secret:
             reason = check(inner, here)
             if reason:
                 return reason
         if risky_env or sets_risky_env(argv) or sets_risky_env(inner):
             return "gives a secret to a command with an environment variable that can load other code"
-        if piped_secret or safe_secret_use(inner_u):
+        if piped_secret or safe_secret_use(inner_u, argv[1], here):
             return None
-        return "gives a secret to a command that is not on the safe list"
+        return NOT_SAFE
+    if prog in SECRET_TOOLS and len(argv) > 2 and argv[1] == "generate" and "--copy" in argv[2:]:
+        return "puts a new secret on the clipboard"
     if prog == "gh" and len(argv) >= 3:
         sub = argv[1:3]
         if sub[0] == "release" and sub[1] in ("create", "edit", "delete", "upload", "delete-asset"):
@@ -553,6 +676,9 @@ def scan(text, here):
         return "reads or writes the Hushkey backup files, unit or script through a redirect"
     # export NODE_OPTIONS=... earlier in the same command line counts too.
     risky_env = risky_env or any(sets_risky_env(argv) for argv in cmds)
+    # NOT_SAFE is the mildest reason (auto mode may drop it), so keep reading
+    # the later commands for a stronger one.
+    soft = None
     for argv in cmds:
         a = unwrap(argv)
         if a and a[0] in ("cd", "pushd"):
@@ -562,9 +688,11 @@ def scan(text, here):
                 here = os.path.join(here, os.path.expanduser(a[1]))
             continue
         reason = check(argv, here)
-        if reason:
+        if reason == NOT_SAFE:
+            soft = reason
+        elif reason:
             return reason
-    return None
+    return soft
 
 def fallback(text):
     pats = [
@@ -596,6 +724,13 @@ try:
     reason = scan(cmd, cwd)
 except Exception:
     reason = fallback(cmd)
+
+# Auto mode (owner, 2026-11-15): when the only reason is NOT_SAFE, stay silent
+# so the auto mode classifier judges the call; an "ask" here would force a
+# prompt and skip the classifier. Every other reason, and every other mode
+# (bypassPermissions included), still asks.
+if reason == NOT_SAFE and data.get("permission_mode") == "auto":
+    reason = None
 
 if reason:
     print(json.dumps({"hookSpecificOutput": {

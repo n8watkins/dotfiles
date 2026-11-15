@@ -110,6 +110,33 @@ def parse_commands(text):
             if text[i + 1:i + 2] != "\n":
                 cur = (cur or "") + text[i + 1:i + 2]
             i += 2
+        elif c == "$" and text[i + 1:i + 2] == "\"":
+            i += 1  # $"..." (locale quoting) reads like "..."
+        elif c == "$" and text[i + 1:i + 2] == "\x27":
+            # $ followed by a single-quoted string (ANSI-C quoting): decode the
+            # escapes the way bash does.
+            buf, i = "", i + 2
+            while True:
+                if i >= n:
+                    raise ValueError("unclosed $\x27 quote")
+                d = text[i]
+                if d == "\x27":
+                    i += 1
+                    break
+                if d == "\\" and i + 1 < n:
+                    e = text[i + 1]
+                    m = re.match(r"x([0-9A-Fa-f]{1,2})|([0-7]{1,3})", text[i + 1:i + 4])
+                    if m:
+                        buf += chr(int(m.group(1), 16) if m.group(1) else int(m.group(2), 8))
+                        i += 1 + len(m.group(0))
+                        continue
+                    buf += {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b",
+                            "f": "\f", "v": "\v"}.get(e, e)
+                    i += 2
+                    continue
+                buf += d
+                i += 1
+            cur = (cur or "") + buf
         elif c == "\x27":
             j = text.find("\x27", i + 1)
             if j < 0:
@@ -406,21 +433,37 @@ SCRIPT_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.-]*$")
 RISKY_ENV = re.compile(r"^(NODE_OPTIONS|NODE_PATH|PATH|PYTHON[A-Z_]*|LD_[A-Z_]+|DYLD_[A-Z_]+|"
                        r"BASH_ENV|ENV|PERL5[A-Z_]*|RUBYOPT|RUBYLIB|npm_config_[a-z_]+|NPM_CONFIG_[A-Z_]+)=")
 ASSIGNERS = {"export", "declare", "typeset", "readonly", "local"}
-# Variables set for the rest of the command line (export X=1; X=1 alone), and
-# whether the hook lost track of the folder bash is in. Both only grow.
+# Builtins that set variables in ways the hook does not follow, or run text it
+# cannot read: after one of them the environment and folder are unknown.
+OPAQUE_BUILTINS = {"read", "mapfile", "readarray", "eval", "source", "."}
+# Variables set for the rest of the command line (export X=1; X=1 alone),
+# whether some other builtin may have set any (ENV_UNKNOWN), and whether the
+# hook lost track of the folder bash is in. All only grow.
 SHELL_ENV = set()
+ENV_UNKNOWN = [False]
 CWD_UNKNOWN = [False]
 
 def risky(names):
     return any(RISKY_ENV.match(n + "=") for n in names)
 
 def shell_assignments(argv):
-    """Names a command sets for the commands after it: export X=1, or X=1 alone."""
+    """Names a command sets for the commands after it: export X=1, or X=1 alone.
+
+    Sets ENV_UNKNOWN for read, mapfile, eval, source, ., printf -v, set -a,
+    and export/declare of a name without a value (it exports whatever another
+    builtin put there).
+    """
     a, names, _ = unwrap_full(argv)
     if not a:
         return names
-    if a[0] in ASSIGNERS:
-        return {m.group(1) for m in map(ASSIGNMENT.match, a[1:]) if m}
+    prog, args = a[0], a[1:]
+    if prog in OPAQUE_BUILTINS or (prog == "printf" and any(x.startswith("-v") for x in args)) \
+            or (prog == "set" and any(x == "allexport" or re.match(r"^-[a-z]*a", x) for x in args)):
+        ENV_UNKNOWN[0] = True
+    if prog in ASSIGNERS:
+        if any(not x.startswith("-") and not ASSIGNMENT.match(x) for x in args):
+            ENV_UNKNOWN[0] = True
+        return {m.group(1) for m in map(ASSIGNMENT.match, args) if m}
     return set()
 
 def flag_name(a):
@@ -535,31 +578,52 @@ def script_file_ok(a, here):
             or project_file(os.path.join(top, "__main__.py"), here)
     return project_file(rest[0], here)
 
-# Launchers that run another command: (words, kind). "download" may fetch a
-# package from the registry; "local" runs only what the project has.
-LAUNCHERS = {("npx",): "download", ("bunx",): "download", ("pnpm", "dlx"): "download",
-             ("npm", "exec"): "download", ("npm", "x"): "download", ("yarn", "dlx"): "download",
-             ("bun", "x"): "download", ("uvx",): "download", ("pnpm", "exec"): "local",
-             ("yarn", "exec"): "local", ("uv", "run"): "local"}
+# Launchers that run another command: (words, kind). "npx" runs the bin of the
+# project first and fetches from npm otherwise; "download" may fetch from npm;
+# "pypi" fetches from PyPI, where none of the tool names here belong to the vendor;
+# "local" runs only what the project has.
+LAUNCHERS = {("npx",): "npx", ("bunx",): "download", ("pnpx",): "download",
+             ("pnpm", "dlx"): "download", ("npm", "exec"): "download", ("npm", "x"): "download",
+             ("yarn", "dlx"): "download", ("bun", "x"): "download", ("uvx",): "pypi",
+             ("uv", "tool", "run"): "pypi", ("pipx", "run"): "pypi",
+             ("pnpm", "exec"): "local", ("yarn", "exec"): "local", ("uv", "run"): "local"}
 LAUNCHER_VALUE_FLAGS = {"-p", "--package", "--with", "--python", "--env-file", "--directory",
                         "--project", "--extra", "--group", "--index", "--from"}
+# Package-manager options that may come before exec/dlx (pnpm --filter app exec,
+# npm --prefix app exec); the launcher is still read, but never counts as clean.
+PM_GLOBAL_VALUE_FLAGS = {"--filter", "-F", "-C", "--dir", "--prefix", "-w", "--workspace"}
 
 def strip_launcher(a):
     """(command, kind, clean, call) for a launcher, or (a, None, True, None).
 
     clean is False when the launcher has flags other than the harmless
-    WRAPPER_FLAGS (uv run: UV_FLAGS); call is the text of npx -c "...".
+    WRAPPER_FLAGS (uv run: UV_FLAGS) or package-manager options before it;
+    call is the text of npx -c "...". npx with -y/--yes or -p is "download".
     """
     if not a:
         return a, None, True, None
-    first = os.path.basename(a[0])
+    first, pre_clean, b = os.path.basename(a[0]), True, list(a)
+    if first in ("pnpm", "npm", "yarn"):
+        j = 1
+        while j < len(b):
+            if first == "yarn" and b[j] == "workspace" and j + 1 < len(b):
+                j += 2
+            elif b[j].startswith("-"):
+                f, _ = flag_parts(b, j)
+                j += 2 if f in PM_GLOBAL_VALUE_FLAGS and "=" not in b[j] and len(b[j]) == len(f) else 1
+            else:
+                break
+        if j > 1:
+            b, pre_clean = [b[0]] + b[j:], False
     for words, kind in LAUNCHERS.items():
-        if (first,) + tuple(a[1:len(words)]) == words:
-            rest, clean, call = a[len(words):], True, None
+        if (first,) + tuple(b[1:len(words)]) == words:
+            rest, clean, call = b[len(words):], pre_clean, None
             while rest and rest[0].startswith("-"):
                 f, value = flag_parts(rest, 0)
-                if rest[0] in ("--no-install", "--no"):
+                if rest[0] in ("--no-install", "--no") and kind == "npx":
                     kind = "local"
+                elif rest[0] in ("-y", "--yes") and kind == "npx":
+                    kind = "download"
                 elif rest[0] in WRAPPER_FLAGS or (words == ("uv", "run") and rest[0] in UV_FLAGS):
                     pass
                 elif words == ("uv", "run") and f in UV_VALUE_FLAGS:
@@ -569,6 +633,8 @@ def strip_launcher(a):
                     call, clean = value, False
                 else:
                     clean = False
+                    if kind == "npx":
+                        kind = "download"  # npx -p and friends: fetch on purpose
                     if f in LAUNCHER_VALUE_FLAGS and "=" not in rest[0] and len(rest[0]) == len(f):
                         rest = rest[2:]
                         continue
@@ -576,11 +642,27 @@ def strip_launcher(a):
             return rest, kind, clean, call
     return a, None, True, None
 
-def tool_of(a, kind):
+def local_bin(tool, here):
+    """True if node_modules/.bin/<tool> exists between `here` and the project root."""
+    root = project_root(here)
+    if not root or not re.match(r"^[A-Za-z0-9_.-]+$", tool):
+        return False
+    d = os.path.realpath(here)
+    while d.startswith(root):
+        if os.path.exists(os.path.join(d, "node_modules", ".bin", tool)):
+            return True
+        if d == root:
+            break
+        d = os.path.dirname(d)
+    return False
+
+def tool_of(a, kind, here):
     """Normalize the tool name: pinned versions, scoped packages, node_modules/.bin.
 
     Returns None when the tool is not one a launcher may fetch or run.
     """
+    if kind == "pypi":
+        return None  # uvx, uv tool run, pipx run: PyPI names are not the vendors here
     tool = re.sub(r"(?<=.)@[^/]*$", "", a[0])  # pinned version: wrangler@4.1.0
     if tool.startswith("@"):
         return SCOPED_TOOLS.get(tool)
@@ -588,9 +670,14 @@ def tool_of(a, kind):
         if not re.match(r"^(\./)?node_modules/\.bin/[^/]+$", tool) or kind:
             return None  # a script or a binary outside the project
         return os.path.basename(tool)
+    if kind == "npx" and tool not in VENDOR_PACKAGES and not (tool == a[0] and local_bin(tool, here)):
+        return None  # npx would fetch whatever npm package has that name
     if kind == "download" and tool not in VENDOR_PACKAGES:
-        return None  # npx/bunx/dlx would fetch whatever package has that name
+        return None  # bunx/dlx/npx -y fetch whatever package has that name
     return tool
+
+BRACE_WORD = re.compile(r"\{[^{}]*(,|\.\.)[^{}]*\}")  # brace expansion: {a,b}, {1..3}
+LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 def path_ok(x, here, mode):
     """An argument that is a path outside the project (absolute, ~ or ..) is not."""
@@ -603,7 +690,7 @@ def path_ok(x, here, mode):
 def args_ok(args, here, mode):
     """Checks on every argument after the tool name."""
     for i, x in enumerate(args):
-        if "$" in x or "`" in x:
+        if "$" in x or "`" in x or BRACE_WORD.search(x):
             return False  # expanded by the shell: unknown text
         if x.startswith("@") or "=@" in x:
             return False  # @file uploads a file
@@ -611,6 +698,8 @@ def args_ok(args, here, mode):
             f, value = flag_parts(args, i)
             if f in HOST_FLAGS:
                 return False
+            if f == "--ip" and value not in LOOPBACK:
+                return False  # wrangler dev --ip 0.0.0.0 serves the Worker to the network
             if f in CONFIG_FLAGS:
                 if not (project_file(value, here) or (mode == "pipe" and value == "/dev/stdin")):
                     return False
@@ -630,16 +719,48 @@ GH_READ = {"pr": {"view", "list", "status", "checks", "diff"}, "run": {"view", "
 
 def gh_read_ok(a):
     """gh under run: read commands and GET API calls only (no extensions, aliases, gists)."""
+    if "--web" in a or "-w" in a:
+        return False  # opens a browser on the desktop
     if a[1:2] == ["api"]:
         rest = a[2:]
         for i, x in enumerate(rest):
             f, value = flag_parts(rest, i)
             if f in ("-X", "--method") and value.upper() != "GET":
                 return False
-            if f in GH_API_FIELD_FLAGS:
-                return False
+            if f in GH_API_FIELD_FLAGS or f in ("-H", "--header"):
+                return False  # fields make it a POST; a header can override the method
+            if "://" in x:
+                return False  # a full URL sends the token to that host
         return True
     return len(a) >= 3 and a[2] in GH_READ.get(a[1], ())
+
+def subcommand(a, n):
+    """The first n positional words after the tool (flags and their = values skipped)."""
+    return [x for x in a[1:] if not x.startswith("-")][:n]
+
+# A command whose output goes straight into the store: `... | pass-env set <entry>`
+# (set by scan() for the command it is checking). Minting forms need it.
+PIPED_TO_STORE = [False]
+TURSO_READ = {("db", "list"), ("db", "show"), ("db", "inspect"), ("db", "locations"),
+              ("group", "list"), ("org", "list"), ("plan", "show"), ("auth", "whoami")}
+TURSO_MINT = (["db", "tokens", "create"], ["group", "tokens", "create"], ["auth", "token"],
+              ["auth", "api-tokens", "mint"])
+
+def turso_ok(a):
+    """turso: read and list commands; a token-minting one only when piped into the store."""
+    if any(subcommand(a, len(m)) == m for m in TURSO_MINT):
+        return PIPED_TO_STORE[0]
+    return tuple(subcommand(a, 2)) in TURSO_READ
+
+def stripe_ok(a):
+    """stripe: GET requests, list and retrieve; no listen (prints a signing secret), no writes."""
+    sub = subcommand(a, 2)
+    return sub[:1] in (["get"], ["version"], ["status"]) or (len(sub) == 2 and sub[1] in ("list", "retrieve"))
+
+def sentry_ok(a):
+    """sentry-cli: info and list commands only; uploads and releases ask."""
+    sub = subcommand(a, 2)
+    return sub[:1] == ["info"] or a[1:2] == ["--version"] or (len(sub) == 2 and sub[1] in ("list", "info"))
 
 def gh_repo_ok(args):
     """gh secret set: the current repository, or --repo n8watkins/<name>; no org or user scope."""
@@ -678,6 +799,8 @@ def entry_ok(e):
     return bool(e) and not e.startswith(("-", "/", "~")) and ".." not in e.split("/") \
         and re.match(r"^[A-Za-z0-9_./-]+$", e) is not None
 
+CLI_READ_OK = {"gh": gh_read_ok, "turso": turso_ok, "stripe": stripe_ok, "sentry-cli": sentry_ok}
+
 def run_use_ok(a, here):
     """pass-env run -- <a>: a known tool, project script or package.json script."""
     uv = len(a) >= 2 and os.path.basename(a[0]) == "uv" and a[1] == "run"
@@ -688,7 +811,7 @@ def run_use_ok(a, here):
         # uv run <named project command | project file | python <project file>>.
         ok = a[0] in UV_COMMANDS or project_file(a[0], here) or script_file_ok(a, here)
         return ok and args_ok(a[1:], here, "run")
-    tool = tool_of(a, kind)
+    tool = tool_of(a, kind, here)
     if not tool:
         return False
     a = [tool] + a[1:]
@@ -715,10 +838,8 @@ def run_use_ok(a, here):
         ok = True
     else:
         ok = any(a[:len(p)] == p for p in SAFE_SECRET_USES + RUN_ONLY_USES)
-        if ok and tool == "gh":
-            ok = gh_read_ok(a)
-        if ok and tool == "turso" and "shell" in a:
-            ok = False  # turso db shell runs SQLite dot commands, .shell included
+        if ok and tool in CLI_READ_OK:
+            ok = CLI_READ_OK[tool](a)
         if ok and tool == "tsc":
             for i, x in enumerate(a[1:], 1):
                 f, value = flag_parts(a, i)
@@ -728,6 +849,9 @@ def run_use_ok(a, here):
             # next dev <dir> would run another project; allow only port and host values.
             rest, i = a[2:], 0
             while i < len(rest):
+                if rest[i] in ("-H", "--hostname") and rest[i + 1:i + 2] and rest[i + 1] not in LOOPBACK:
+                    ok = False  # serves the app to the network
+                    break
                 if rest[i] in ("-p", "--port", "-H", "--hostname"):
                     i += 2
                 elif rest[i].startswith("-"):
@@ -742,7 +866,7 @@ def pipe_sink_ok(a, here):
     a, kind, clean, _ = strip_launcher(a)
     if not clean or not a:
         return False
-    tool = tool_of(a, kind)
+    tool = tool_of(a, kind, here)
     if not tool:
         return False
     a = [tool] + a[1:]
@@ -860,19 +984,69 @@ def secret_use_reason(raw, argv, here):
         return inner_reason
     if risky(names):
         return "gives a secret to a command with an environment variable that can load other code"
-    if outer_moved or inner_moved:
-        return NOT_SAFE  # env -C or an env option the hook does not read
+    if outer_moved or inner_moved or ENV_UNKNOWN[0]:
+        return NOT_SAFE  # env -C, an env option the hook does not read, or read/eval/source
     if names - (SAFE_ENV if argv[1] == "run" else set()):
         return NOT_SAFE  # could point the tool at another host (CLOUDFLARE_API_BASE_URL, ...)
     ok = pipe_sink_ok(inner, here) if argv[1] == "pipe" else run_use_ok(inner, here)
     return None if ok and not inner_reason else NOT_SAFE
 
+# Programs whose word, found anywhere in a command the hook does not know
+# (mise exec, nice -n 5, sudo -u x, volta run, pnpm --filter x exec, ...), is
+# checked again from that word on, so a wrapper never hides a specific reason.
+NET_PROGS = {"gh", "git", "wrangler", "restic", "npm", "pnpm", "yarn", "bun", "npx", "bunx",
+             "pnpx", "release-kit", "eval", "pass-env", "hushkey"} | SHELLS
+UNREADABLE = "runs a command whose name is only known when the shell runs it ($VAR, $(...))"
+
+def expand_braces(argv):
+    """Bash brace expansion of {a,b} words (one level), empty results dropped."""
+    out = []
+    for w in argv:
+        m = re.search(r"\{([^{}]*,[^{}]*)\}", w)
+        if not m:
+            out.append(w)
+            continue
+        for alt in m.group(1).split(","):
+            word = w[:m.start()] + alt + w[m.end():]
+            if word:
+                out.extend(expand_braces([word]))
+    return out
+
 def check(argv, here):
-    raw = argv
-    argv = unwrap(argv)
-    if not argv:
+    """Why the command needs the owner, or None.
+
+    Every simple command goes through here. Positive allow decisions are made
+    only in secret_use_reason (pass-env run/pipe); everything else is a list
+    of specific reasons. To keep wrappers from hiding those reasons, a command
+    whose program check_known() has no reason for is checked again from every
+    later word naming one of NET_PROGS, and a program name the shell builds at
+    run time asks.
+    """
+    a = expand_braces(unwrap(argv))
+    if not a:
         return None
+    if "$" in a[0] or "`" in a[0]:
+        return UNREADABLE
+    reason = check_known(argv, a, here)
+    if reason or text_command(a) or os.path.basename(a[0]) in ("gh", "git", "wrangler") \
+            or os.path.basename(a[0]) in SECRET_TOOLS:
+        return reason
+    soft = None
+    for j in range(1, len(a)):
+        name = tool_name(a[j].rsplit("#", 1)[-1])  # nix run nixpkgs#gh -- ...
+        if name in NET_PROGS:
+            rest = a[j + 1:]
+            reason = check([name] + (rest[1:] if rest[:1] == ["--"] else rest), here)
+            if reason == NOT_SAFE:
+                soft = reason  # nice pass-env run -- ...: the secret use is not known safe
+            elif reason:
+                return reason
+    return soft
+
+def check_known(raw, argv, here):
     prog = os.path.basename(argv[0])
+    if prog == "eval":
+        return scan(" ".join(argv[1:]), here)
     if prog in SHELLS:
         for i, a in enumerate(argv[1:], 1):
             if re.match(r"^-[a-z]*c[a-z]*$", a) and i + 1 < len(argv):
@@ -964,22 +1138,39 @@ def scan(text, here):
     # NOT_SAFE is the mildest reason (auto mode may drop it), so keep reading
     # the later commands for a stronger one.
     soft = None
-    for argv, depth, before, after in cmds:
+    for k, (argv, depth, before, after) in enumerate(cmds):
         a = unwrap(argv)
+        if a and a[0] in OPAQUE_BUILTINS:
+            CWD_UNKNOWN[0] = True  # eval cd x, source x.sh: the folder may change
         if a and a[0] in ("cd", "pushd", "popd"):
             if len(a) > 1 and BACKUP_PATHS.search(a[1]):
                 return "enters the Hushkey backup folder"
-            # Only a plain cd in the main shell moves bash for the commands
-            # after it; in ( ), $( ), a pipeline or the background it does not,
-            # and popd, cd - or a cd with options or $VAR is not followed.
-            if a[0] == "popd" or depth > 0 or before in ("|", "&") or after in ("|", "&") \
-                    or len(a) > 2 or (len(a) == 2 and (a[1] == "-" or a[1].startswith("-")
-                                                       or "$" in a[1] or "`" in a[1])):
+            target = a[1] if len(a) == 2 else ("~" if len(a) == 1 else None)
+            literal = target is not None and target != "-" and not target.startswith("-") \
+                and "$" not in target and "`" not in target
+            path = os.path.join(here, os.path.expanduser(target)) if literal else None
+            # The folder is followed only for a cd that surely ran and surely
+            # moved bash: in the main shell (not ( ), $( ), a pipeline or the
+            # background), not inside if/while/{ } (argv starts with a keyword),
+            # and not next to && or || (it may not run, or may fail and the
+            # line goes on), with one exception: a first command
+            # `cd <existing dir> && ...`, where the rest runs only if it worked.
+            sure = literal and a[0] != "popd" and depth == 0 and argv[0] not in KEYWORDS \
+                and before not in ("|", "&", "&&", "||") and after not in ("|", "&", "||") \
+                and (after != "&&" or (k == 0 and os.path.isdir(path)))
+            if not sure:
                 CWD_UNKNOWN[0] = True
-            else:
-                here = os.path.join(here, os.path.expanduser(a[1] if len(a) == 2 else "~"))
+            if path:
+                here = path  # still the best guess for the git branch checks
             continue
-        reason = check(argv, here)
+        nxt = unwrap(cmds[k + 1][0]) if after == "|" and k + 1 < len(cmds) else []
+        saved = PIPED_TO_STORE[0]
+        PIPED_TO_STORE[0] = len(nxt) == 3 and os.path.basename(nxt[0]) in SECRET_TOOLS \
+            and nxt[1] == "set" and entry_ok(nxt[2])
+        try:
+            reason = check(argv, here)
+        finally:
+            PIPED_TO_STORE[0] = saved
         if reason == NOT_SAFE:
             soft = reason
         elif reason:

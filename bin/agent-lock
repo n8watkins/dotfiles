@@ -50,7 +50,7 @@ NO_SNAPSHOT = "no approved snapshot"
 SAFETY = [
     "claude/settings*.json:hooks", "claude/settings*.json:permissions",
     "claude/settings*.json:disableAllHooks", "claude/settings*.json:sandbox",
-    "claude/settings*.json:autoMode",
+    "claude/settings*.json:autoMode", "project:*/.claude/settings*.json:autoMode",
     "file:~/.claude/hooks/*", "file:~/.config/agent-hooks/*",
     "file:~/.config/dcg/*",
     "file:~/AGENTS.md", "file:~/.claude/CLAUDE.md", "file:~/.codex/AGENTS.md",
@@ -81,21 +81,42 @@ def read_json(path: Path):
         return None
 
 
-def sync_bookkeeping(rel_dir: Path, name: str) -> bool:
-    """Files the skill sync rewrites every round without a content change.
+class SyncedSkills:
+    """What the skill sync rewrites every round in ~/.claude/skills/synced.
 
-    ~/.claude/skills/synced/<bucket>/ holds the synced skills plus the sync's own
-    bookkeeping: dot entries (.bucket-*, .last-complete-round, .staging) in the
-    top two levels and the bucket's manifest.json. Files inside a skill count.
+    Layout: synced/.bucket-<id> (an empty marker file) and synced/<id>/ with the
+    skills, a .last-complete-round file, a .staging folder and manifest.json.
+    The two marker files are left out. The manifest counts without its
+    timestamps (lastUpdated, each skill's updatedAt), so a changed name,
+    description or source still shows. Everything else counts, .staging too:
+    it is empty between rounds.
     """
-    depth = len(rel_dir.parts)
-    return depth <= 1 and (name.startswith(".") or (depth == 1 and name == "manifest.json"))
+
+    @staticmethod
+    def skip(rel: Path, name: str) -> bool:
+        depth = len(rel.parts)
+        return (depth == 0 and name.startswith(".bucket-")) or (depth == 1 and name == ".last-complete-round")
+
+    @staticmethod
+    def content(rel: Path, name: str, data: bytes) -> bytes:
+        if len(rel.parts) != 1 or name != "manifest.json":
+            return data
+        try:
+            manifest = json.loads(data)
+            manifest.pop("lastUpdated", None)
+            for skill in manifest.get("skills") or []:
+                if isinstance(skill, dict):
+                    skill.pop("updatedAt", None)
+            return json.dumps(manifest, sort_keys=True).encode()
+        except (ValueError, AttributeError, TypeError):
+            return data  # not the shape we know: count it as it is
 
 
-def file_print(path: Path, skip=None):
+def file_print(path: Path, rules=None):
     """Fingerprint of a file, or of every file in a folder (following links).
 
-    skip(rel_dir, name) -> True leaves that file or folder out.
+    rules.skip(rel_dir, name) -> True leaves that file out; rules.content(rel_dir,
+    name, data) returns the bytes that count for it.
     """
     if path.is_file():
         try:
@@ -106,14 +127,15 @@ def file_print(path: Path, skip=None):
         parts = []
         for root, dirs, files in os.walk(path, followlinks=True):
             rel = Path(root).relative_to(path)
-            dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules", "__pycache__")
-                             and not (skip and skip(rel, d)))
+            dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules", "__pycache__"))
             for name in sorted(files):
-                if skip and skip(rel, name):
+                if rules and rules.skip(rel, name):
                     continue
                 full = Path(root) / name
                 try:
-                    parts.append([str(full.relative_to(path)), digest(full.read_bytes())])
+                    data = full.read_bytes()
+                    parts.append([str(full.relative_to(path)),
+                                  digest(rules.content(rel, name, data) if rules else data)])
                 except OSError:
                     parts.append([str(full.relative_to(path)), "unreadable"])
         return digest(parts)
@@ -182,8 +204,8 @@ def collect(project: Path | None = None) -> dict:
         if folder.is_dir():
             for s in sorted(folder.iterdir()):
                 if not s.name.startswith(".") and not s.name.endswith(".pre-dotfiles"):
-                    skip = sync_bookkeeping if s == HOME / ".claude/skills/synced" else None
-                    add(f"skill:{tilde(s)}", file_print(s, skip), s)
+                    rules = SyncedSkills if s == HOME / ".claude/skills/synced" else None
+                    add(f"skill:{tilde(s)}", file_print(s, rules), s)
 
     codex_path = HOME / ".codex/config.toml"
     try:

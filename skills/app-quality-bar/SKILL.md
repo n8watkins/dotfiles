@@ -246,7 +246,7 @@ The checklist covers sections 1-9 and 12-21.
 
 ## Known gaps (2026-11-04)
 
-### FitFlow 7 (`~/projects/fitflow7`, https://fitflow7.n8builds.dev)
+### FitFlow 7 (`~/projects/apps/fitflow7`, https://fitflow7.n8builds.dev)
 
 - Nine top-level links in the desktop header (Workouts, Calendar, Stats, Challenges, Exercises, History, Insights, Community, Settings); phones hide four behind "More".
   Group into about four (Today, Plan with Calendar and Challenges, Progress with Stats, History and Insights, Library) plus Settings in the avatar menu.
@@ -259,7 +259,7 @@ The checklist covers sections 1-9 and 12-21.
 - Settings is one 2297 px scrolling page of cards; convert to a sectioned dialog with Display (theme), Workout defaults, Audio, Data and Account sections.
 - No bundled font (falls back to `ui-sans-serif, system-ui`), so it renders as DejaVu on Linux and differently per OS; Vite app, so self-host a variable font.
 
-### Feelium (`~/projects/feelium`, https://feelium.n8builds.dev)
+### Feelium (`~/projects/apps/feelium`, https://feelium.n8builds.dev)
 
 - The "N" avatar in `src/components/top-bar.tsx` is a plain link to `/settings`; make it a menu (name, email, Settings, theme, Sign out, sign out everywhere) with `src/components/ui/dropdown-menu.tsx`, which already exists.
 - Desktop Today is a 768 px column (`max-w-3xl` in `src/app/(app)/layout.tsx`) with four stacked 1-5 scales, about 180 px each, so a check-in needs scrolling on a 900 px laptop.
@@ -279,14 +279,14 @@ Full grades and evidence: `APP_SCORECARD.md` in the private `secret-handling-rev
 - Unknown paths: framework default 404 on Scribe, Sprite Bench and KeysReady, an unstyled one on Cutely Ask, status 200 on FitFlow 7, OpenPing and Who Am I, and a redirect to sign-in on Feelium.
 - No Open Graph image on Feelium, FitFlow 7, KeysReady, Pivot, PortfolioRank and Who Am I.
 
-### Pivot (`~/projects/pivot`, https://pivot.n8builds.dev)
+### Pivot (`~/projects/apps/pivot`, https://pivot.n8builds.dev)
 
 - Deleting data uses `window.confirm` (`src/app/settings/page.tsx`); use a dialog that names the loss, and Undo for single deletes.
 - Sign-in is GitHub only from the Settings page; add the sign-in modal.
 - Light only; add the dark theme.
 - Desktop Lighthouse fails with NO_NAVSTART on `/`, which suggests a navigation during load; find it.
 
-### OpenPing (`~/projects/open-ping`, https://openping.n8builds.dev)
+### OpenPing (`~/projects/apps/open-ping`, https://openping.n8builds.dev)
 
 - Eight sidebar destinations and a phone "More" menu (`src/client/components/AppLayout.tsx`); group to about five.
 - The app redirects to a `/login` page while the landing has a sign-in modal; use the modal everywhere.
@@ -303,7 +303,7 @@ Full grades and evidence: `APP_SCORECARD.md` in the private `secret-handling-rev
 - `app.` serves the marketing page; shops and drivers sign in on separate `/login` pages.
 - Em dashes in the title, manifest name and hero copy; system font; an auto-rotating hero card.
 
-### Cutely Ask (`~/projects/cutelyaskme`, https://cutelyaskme.nathancwatkins23.workers.dev)
+### Cutely Ask (`~/projects/apps/cutelyaskme`, https://cutelyaskme.nathancwatkins23.workers.dev)
 
 - The 404 renders unstyled; the desktop home is a small card on an empty page.
 - One product, three names (Cutely Ask, Date Night, cutelyaskme), and an em dash in the title.

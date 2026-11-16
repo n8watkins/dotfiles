@@ -37,6 +37,24 @@
       "Bash(*wrangler* r2 bucket lock remove*)",
       "Bash(*wrangler* r2 bucket lock set*)",
       "Bash(*wrangler* r2 object delete*)",
+      "Bash(*wrangler* r2 bucket lifecycle add*)",
+      "Bash(*wrangler* r2 bucket lifecycle remove*)",
+      "Bash(*wrangler* r2 bucket lifecycle set*)",
+      "Bash(*wrangler delete*)",
+      "Bash(*wrangler@* delete*)",
+      "Bash(*wrangler* d1 delete*)",
+      "Bash(*wrangler* d1 execute*--remote*)",
+      "Bash(*wrangler* kv namespace delete*)",
+      "Bash(*wrangler* kv key delete*)",
+      "Bash(*wrangler* kv bulk delete*)",
+      "Bash(*wrangler* queues delete*)",
+      "Bash(*wrangler* queues purge*)",
+      "Bash(*wrangler* secret delete*)",
+      "Bash(*wrangler* pages project delete*)",
+      "Bash(*wrangler* pages deployment delete*)",
+      "Bash(*wrangler* vectorize delete*)",
+      "Bash(*wrangler* hyperdrive delete*)",
+      "Bash(*wrangler* rollback*)",
       "Bash(npm run release)",
       "Bash(npm run release *)",
       "Bash(npm run-script release*)",
@@ -380,6 +398,15 @@
           {
             "type": "command",
             "command": "/home/natkins/.claude/hooks/confirm-destructive-git.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__.*cloudflare-api__execute$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/natkins/.claude/hooks/confirm-cloudflare-delete.sh"
           }
         ]
       }

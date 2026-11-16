@@ -14,8 +14,9 @@
 #   a repeated `method` key, a shorthand { method }, or any other literal;
 # - code that could set a method where the parser does not look (the backstop):
 #   a string that is exactly DELETE outside a plain key value or comparison, a
-#   JSON text with "method":"DELETE", a computed key on a request object, or
-#   eval, Function, Reflect, defineProperty, fromEntries, fromCharCode or atob;
+#   JSON text with "method":"DELETE", a computed key on a request object, a
+#   call through a name built from pieces (globalThis["ev" + "al"]), or eval,
+#   Function, Reflect, defineProperty, fromEntries, fromCharCode or atob;
 # - the calls in DESTRUCTIVE below that destroy data, cannot be undone or send
 #   email, matched against the path of each request (concatenations and
 #   templates read with * for the parts that are not literal);
@@ -280,6 +281,7 @@ class Code:
         self.key_values = set()     # literal tokens that are a key, or the value of a key other than method
         self.method_values = []     # value ranges assigned to a method outside an object literal
         self.computed_assign = False
+        self.computed_call = False
         self.read_objects()
         self.read_assignments()
         self.read_bindings()
@@ -374,9 +376,12 @@ class Code:
             elif tok == P("[") and prev[0] in OPERAND_END + ("punct",) and prev not in (P("("), P(","), P("="), P(":"), P("{"), P(";")):
                 close = self.match[k]
                 nxt = self.tok(close + 1)
+                inside = t[k + 1:close]
+                if nxt == P("(") and any(x == P("+") or x[0] == "tplx" for x in inside):
+                    self.computed_call = True  # globalThis["ev" + "al"](...)
+                    continue
                 if nxt[0] != "punct" or nxt[1] not in ASSIGN_OPS:
                     continue
-                inside = t[k + 1:close]
                 if len(inside) == 1 and inside[0][0] in ("str", "tpl"):
                     if inside[0][1] == "method":
                         self.method_values.append((close + 2, self.value_end(close + 2)) if nxt[1] == "=" else None)
@@ -601,6 +606,8 @@ def analyse(src):
         if code.computed_assign or any(o["computed"] and ("path" in o["keys"] or "method" in o["keys"])
                                        for o in code.objects):
             found.append("sets a computed key on a request, which could be its method")
+        if code.computed_call:
+            found.append("calls a function whose name is built at run time")
         names = [x for x in RUNTIME_NAMES if ("id", x) in t]
         if names:
             found.append("builds code or objects at run time (" + ", ".join(names) + ")")

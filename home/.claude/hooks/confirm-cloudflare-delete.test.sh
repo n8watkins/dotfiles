@@ -167,6 +167,8 @@ run ask 'async () => { const o = { path: "/zones/z" }; Object.defineProperty(o, 
 run ask 'async () => { const o = { path: "/zones/z" }; Reflect.set(o, k, v); return cloudflare.request(o); }' 'Reflect'
 run ask $'async () => cloudflare.request(JSON.parse(\'{"method":"DELETE","path":"/zones/z"}\'))' 'JSON text that sends DELETE'
 run ask 'async () => eval(code)' 'eval'
+run ask 'async () => globalThis["ev" + "al"](code)' 'name is built at run time'
+run allow 'async () => { const r = await cloudflare.request({ path: "/zones" }); return r.result.map((z) => z["na" + "me"]); }'
 run ask 'async () => new Function("cf", body)(cloudflare)' 'Function'
 run ask 'async () => cloudflare.request({ get method() { return verb; }, path: "/zones/z" })' 'method could not be read'
 run ask 'async () => { class R { method = verb; path = "/zones/z"; } return cloudflare.request({ ...new R() }); }' 'method could not be read'

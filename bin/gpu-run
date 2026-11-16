@@ -1,0 +1,711 @@
+#!/usr/bin/env -S python3 -I
+"""gpu-run: run a command as a graphics-card job and record what happened.
+
+  gpu-run --label "<what this is>" [--kind KIND] [--cpu] [--no-lock] [--only-when-idle MIN] -- <command...>
+  gpu-run --watch <seconds> [--label "<what>"]   sample the card without running anything
+  gpu-run --report [--since YYYY-MM-DD]           Markdown summary of the log
+  gpu-run --events [--since YYYY-MM-DD]           Windows display driver events
+  gpu-run --off "<reason>" | --on                 switch GPU jobs off or on everywhere
+
+A job waits for the shared card lock (/tmp/test-gpu-1.lock, the same flock the party-games
+test helper takes) and refuses to start while TEST_NO_GPU=1 is set or the OFF marker exists.
+While it runs, one long-lived PowerShell process on the Windows side reads the GPU performance
+counters every two seconds and streams them back. At the end one JSON line goes to
+~/.local/state/gpu/jobs.jsonl and three summary lines are printed.
+
+--cpu marks a CPU comparison run of the same label: it takes no lock, runs while the card is
+switched off, and sets TEST_NO_GPU=1 for the command so test browsers draw in software.
+
+Environment (mostly for tests): GPU_RUN_STATE (state folder), GPU_RUN_LOCK (lock file),
+GPU_RUN_ADAPTER (adapter name to sample, default "RX 7800"), GPU_RUN_SAMPLER, GPU_RUN_EVENTS
+and GPU_RUN_IDLE (commands that replace the Windows sampler, event query and idle check).
+--only-when-idle MIN refuses unless nobody has touched the PC for MIN minutes and no full-screen
+program has the screen (Windows GetLastInputInfo and SHQueryUserNotificationState).
+
+Exit codes: the command's own, 3 when the card is switched off, 4 when the PC is not idle,
+2 for usage errors.
+"""
+
+import argparse
+import base64
+import ctypes
+import fcntl
+import json
+import os
+import resource
+import shlex
+import shutil
+import signal
+import statistics
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+
+HOME = os.path.expanduser("~")
+STATE = os.environ.get("GPU_RUN_STATE") or os.path.join(HOME, ".local/state/gpu")
+LOG = os.path.join(STATE, "jobs.jsonl")
+OFF = os.path.join(STATE, "OFF")
+LOCK = os.environ.get("GPU_RUN_LOCK") or "/tmp/test-gpu-1.lock"
+ADAPTER = os.environ.get("GPU_RUN_ADAPTER") or "RX 7800"
+INTERVAL = 2.0
+KINDS = ["browser-test", "blender", "image", "model", "other"]
+GB = 1024**3
+
+# The sampler runs on Windows. It reads whole counter categories at once
+# (PerformanceCounterCategory.ReadCategory: about 2 ms after a first read of about 5 s),
+# because Get-Counter takes seconds per call with several hundred GPU engine instances.
+# The adapter is picked by name from the DirectX registry keys, which hold each adapter's
+# LUID, the id the counter instance names carry. It writes one JSON line per sample and stops
+# when its output pipe closes (gpu-run ended), or after the deadline.
+SAMPLER_PS = r"""
+$ErrorActionPreference = 'Stop'
+$match = '__MATCH__'; $interval = __INTERVAL__; $deadline = (Get-Date).AddSeconds(__MAXSEC__)
+$out = [Console]::Out
+function Emit($o) { $out.WriteLine(($o | ConvertTo-Json -Compress -Depth 4)); $out.Flush() }
+try {
+  $memCat = New-Object Diagnostics.PerformanceCounterCategory 'GPU Adapter Memory'
+  $engCat = New-Object Diagnostics.PerformanceCounterCategory 'GPU Engine'
+  $pmCat = New-Object Diagnostics.PerformanceCounterCategory 'GPU Process Memory'
+  $mem = $memCat.ReadCategory()['Dedicated Usage']
+  $pick = $null
+  foreach ($k in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\DirectX') {
+    $p = Get-ItemProperty $k.PSPath
+    if (-not $p.Description -or -not $p.AdapterLuid -or $p.Description -notlike "*$match*") { continue }
+    $l = [int64]$p.AdapterLuid
+    $luid = 'luid_0x{0:x8}_0x{1:x8}_' -f ($l -shr 32), ($l -band 0xffffffffL)
+    if (@($mem.Keys | Where-Object { $_.StartsWith($luid) }).Count -gt 0) {
+      $pick = @{ name = ($p.Description -replace '\s+', ' ').Trim(); luid = $luid; total = [int64]$p.DedicatedVideoMemory }
+      break
+    }
+  }
+  if (-not $pick) { Emit @{ error = "no adapter named *$match* in the GPU counters" }; exit 2 }
+  $luid = $pick.luid
+  $names = @{}; $prev = @{}; $n = 0
+  $self = [Diagnostics.Process]::GetCurrentProcess()
+  while ((Get-Date) -lt $deadline) {
+    $t0 = [Environment]::TickCount
+    $eng = $engCat.ReadCategory()['Utilization Percentage']
+    $cur = @{}; $sum = @{}; $types = @{}
+    foreach ($k in $eng.Keys) {
+      if (-not $k.Contains($luid)) { continue }
+      $s = $eng[$k].Sample; $cur[$k] = $s
+      if ($prev.ContainsKey($k)) {
+        $v = [Diagnostics.CounterSample]::Calculate($prev[$k], $s)
+        $e = $k -replace '^pid_\d+_', ''
+        $sum[$e] = [double]$sum[$e] + $v
+      }
+    }
+    $load = $null
+    if ($prev.Count -gt 0) {
+      $load = 0.0
+      foreach ($e in $sum.Keys) {
+        $v = [Math]::Min(100.0, $sum[$e]); $ty = ($e -split 'engtype_')[1]
+        if ($v -gt $load) { $load = $v }
+        if ($v -gt [double]$types[$ty]) { $types[$ty] = [Math]::Round($v, 1) }
+      }
+      $load = [Math]::Round($load, 1)
+    }
+    $prev = $cur
+    $used = [int64]0
+    $mem = $memCat.ReadCategory()['Dedicated Usage']
+    foreach ($k in $mem.Keys) { if ($k.StartsWith($luid)) { $used += $mem[$k].RawValue } }
+    $procs = @()
+    $pm = $pmCat.ReadCategory()['Dedicated Usage']
+    foreach ($k in $pm.Keys) {
+      if (-not $k.Contains($luid)) { continue }
+      $b = $pm[$k].RawValue
+      if ($b -lt 1MB) { continue }
+      $id = [int]($k -replace '^pid_(\d+)_.*$', '$1')
+      $procs += [pscustomobject]@{ id = $id; b = [int64]$b }
+    }
+    if ($n % 30 -eq 0) { $names = @{} }
+    $top = @()
+    foreach ($q in ($procs | Sort-Object b -Descending | Select-Object -First 5)) {
+      if (-not $names.ContainsKey($q.id)) {
+        try { $names[$q.id] = [Diagnostics.Process]::GetProcessById($q.id).ProcessName } catch { $names[$q.id] = '?' }
+      }
+      $top += ,@($names[$q.id], $q.b)
+    }
+    $self.Refresh()
+    $o = @{ t = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0; load = $load; types = $types; used = $used; top = $top; cpu = [Math]::Round($self.TotalProcessorTime.TotalSeconds, 2) }
+    if ($n -eq 0) { $o.adapter = $pick.name; $o.total = $pick.total }
+    Emit $o
+    $n++
+    $wait = $interval - ([Environment]::TickCount - $t0)
+    if ($wait -gt 0) { Start-Sleep -Milliseconds $wait }
+  }
+} catch { exit 0 }
+"""
+
+# Display driver trouble in the Windows logs. On this kind of machine an AMD driver timeout
+# (TDR) shows up as Windows Error Reporting event 1001 "LiveKernelEvent" with code 141 (bucket
+# LKD_0x141_Tdr..._IMAGE_amdkmdag.sys) in the Application log, not as the classic System
+# "Display" 4101. Both are queried, plus application crashes in a graphics module and anything
+# from the AMD kernel drivers or AMD's crash service.
+EVENTS_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$s = [DateTimeOffset]::FromUnixTimeSeconds(__START__).LocalDateTime
+$e = [DateTimeOffset]::FromUnixTimeSeconds(__END__).LocalDateTime
+$found = @()
+$found += Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $s; EndTime = $e; ProviderName = 'Display', 'amdkmdag', 'amdwddmg', 'AMD Crash Defender Service' }
+$found += Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $s; EndTime = $e; ProviderName = 'Windows Error Reporting'; Id = 1001 } |
+  Where-Object { $_.Message -match 'LiveKernelEvent' -and $_.Message -match 'P1: (141|117|1a1|1a8)\b|Tdr|amdkmdag' }
+$found += Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $s; EndTime = $e; ProviderName = 'Application Error'; Id = 1000 } |
+  Where-Object { $_.Message -match 'amd|atig|atiu|d3d|dxgi|vulkan|opengl|igd' }
+$rows = @($found | Where-Object { $_ } | Sort-Object TimeCreated | ForEach-Object {
+  $m = ($_.Message -replace '\s+', ' ')
+  if ($env:USERPROFILE) { $m = $m.Replace($env:USERPROFILE, '%USERPROFILE%') }
+  if ($env:COMPUTERNAME) { $m = $m.Replace($env:COMPUTERNAME, '%COMPUTERNAME%') }
+  @{ time = $_.TimeCreated.ToString('yyyy-MM-ddTHH:mm:sszzz'); log = $_.LogName; provider = $_.ProviderName; id = $_.Id; text = $m.Substring(0, [Math]::Min(160, $m.Length)) }
+})
+ConvertTo-Json -Compress -Depth 3 -InputObject $rows
+"""
+
+# Minutes since the last keyboard or mouse input in the owner's Windows session, and the shell's
+# notification state, which says when a full-screen program (a game, a presentation) has the
+# screen. Borderless-window games may not count as full screen.
+IDLE_PS = r"""
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public static class GpuRunIdle {
+  [StructLayout(LayoutKind.Sequential)] struct LII { public uint cbSize; public uint dwTime; }
+  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII p);
+  [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int s);
+  public static double Minutes() { var l = new LII(); l.cbSize = (uint)Marshal.SizeOf(l); GetLastInputInfo(ref l); return unchecked((uint)Environment.TickCount - l.dwTime) / 60000.0; }
+}
+'@
+$st = 0; [void][GpuRunIdle]::SHQueryUserNotificationState([ref]$st)
+ConvertTo-Json -Compress -InputObject @{ idle_min = [Math]::Round([GpuRunIdle]::Minutes(), 1); state = $st }
+"""
+FULLSCREEN = {2: "a full-screen program", 3: "a full-screen Direct3D game", 4: "presentation mode", 7: "a full-screen app"}
+
+
+def powershell():
+    return shutil.which("powershell.exe") or next(
+        (p for p in ["/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"] if os.path.exists(p)), None)
+
+
+def ps_command(script):
+    exe = powershell()
+    if not exe:
+        return None
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    return [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc]
+
+
+def short(text):
+    return text.replace(HOME, "~") if HOME and HOME != "/" else text
+
+
+def now_iso(ts=None):
+    return datetime.fromtimestamp(ts if ts is not None else time.time()).astimezone().isoformat(timespec="seconds")
+
+
+def loadavg():
+    try:
+        return [round(x, 2) for x in os.getloadavg()]
+    except OSError:
+        return None
+
+
+# ---------- sampler ----------
+
+class Sampler:
+    """Starts the sampler, collects its lines in a thread, and summarises them."""
+
+    def __init__(self, max_seconds):
+        fake = os.environ.get("GPU_RUN_SAMPLER")
+        if fake:
+            cmd = shlex.split(fake)
+        else:
+            script = (SAMPLER_PS.replace("__MATCH__", ADAPTER.replace("'", "''"))
+                      .replace("__INTERVAL__", str(int(INTERVAL * 1000)))
+                      .replace("__MAXSEC__", str(int(max_seconds))))
+            cmd = ps_command(script)
+        self.samples, self.error, self.proc, self.stopping = [], None, None, False
+        self.ready = threading.Event()
+        if not cmd:
+            self.error = "no powershell.exe (not on WSL?)"
+            self.ready.set()
+            return
+        try:
+            self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, cwd="/")
+        except OSError as e:
+            self.error = f"sampler did not start: {e}"
+            self.ready.set()
+            return
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        try:
+            for line in self.proc.stdout:
+                if self.stopping:
+                    break
+                try:
+                    s = json.loads(line)
+                except ValueError:
+                    continue
+                if "error" in s:
+                    self.error = s["error"]
+                    break
+                self.samples.append(s)
+                self.ready.set()
+        except (ValueError, OSError):  # stop() closed the pipe under us
+            pass
+        self.ready.set()
+
+    def wait_ready(self, timeout=30):
+        if not self.ready.wait(timeout):
+            self.error = self.error or "sampler gave no sample in 30 s"
+
+    def stop(self):
+        self.stopping = True
+        # Ending the WSL side ends the Windows process too (checked). If gpu-run itself is
+        # killed, the pipe closes, the next write fails and the sampler exits the same way.
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=INTERVAL * 3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+
+    def summary(self, first_index=0):
+        """Card figures from samples[first_index:]; the sample before it gives 'free before'."""
+        if not self.samples:
+            return {"error": self.error or "no samples"}
+        head = self.samples[0]
+        total = head.get("total") or 0
+        before = self.samples[max(0, first_index - 1)]
+        run = self.samples[first_index:] or self.samples[-1:]
+        loads = [s["load"] for s in run if s.get("load") is not None]
+        types = {}
+        for s in run:
+            for k, v in (s.get("types") or {}).items():
+                types[k] = max(types.get(k, 0), v)
+        peak_vram = max(s.get("used", 0) for s in run)
+        top = {}
+        for s in run:
+            for name, b in s.get("top") or []:
+                top[name] = max(top.get(name, 0), b)
+        out = {
+            "adapter": head.get("adapter"),
+            "samples": len(run),
+            "load_peak": max(loads) if loads else None,
+            "load_avg": round(statistics.fmean(loads), 1) if loads else None,
+            "engines_peak": dict(sorted(types.items(), key=lambda kv: -kv[1])[:4]),
+            "vram_total_gb": round(total / GB, 2) if total else None,
+            "vram_free_before_gb": round((total - before.get("used", 0)) / GB, 2) if total else None,
+            "vram_used_peak_gb": round(peak_vram / GB, 2),
+            "top_vram_gb": [[n, round(b / GB, 2)] for n, b in sorted(top.items(), key=lambda kv: -kv[1])[:5]],
+            "sampler_cpu_s": round(run[-1].get("cpu", 0) - head.get("cpu", 0), 2),
+        }
+        if self.error:
+            out["error"] = self.error
+        return out
+
+
+def driver_events(start, end):
+    fake = os.environ.get("GPU_RUN_EVENTS")
+    if fake:
+        cmd = shlex.split(fake) + [str(int(start)), str(int(end))]
+    else:
+        cmd = ps_command(EVENTS_PS.replace("__START__", str(int(start))).replace("__END__", str(int(end) + 1)))
+    if not cmd:
+        return None
+    try:
+        out = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, cwd="/").stdout
+        rows = json.loads(out.strip() or "[]")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    if isinstance(rows, dict):  # PowerShell 5 unwraps a one-item array
+        rows = [rows]
+    return rows
+
+
+def idle_state():
+    """(minutes idle, notification state) or None when it cannot be read."""
+    fake = os.environ.get("GPU_RUN_IDLE")
+    cmd = shlex.split(fake) if fake else ps_command(IDLE_PS)
+    if not cmd:
+        return None
+    try:
+        d = json.loads(subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                      timeout=60, cwd="/").stdout.strip())
+        return float(d["idle_min"]), int(d["state"])
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return None
+
+
+def not_idle_reason(minutes):
+    st = idle_state()
+    if st is None:
+        return "could not read the Windows idle time"
+    idle, state = st
+    if state in FULLSCREEN:
+        return f"{FULLSCREEN[state]} has the screen"
+    if idle < minutes:
+        return f"the owner used the PC {idle:g} minutes ago (wanted {minutes:g} idle)"
+    return None
+
+
+# ---------- off switch and lock ----------
+
+def off_reason():
+    if os.environ.get("TEST_NO_GPU") == "1":
+        return "TEST_NO_GPU=1 is set"
+    if os.path.exists(OFF):
+        try:
+            with open(OFF) as f:
+                text = f.read().strip()
+        except OSError:
+            text = ""
+        return f"the card is switched off ({short(OFF)}): {text or 'no reason given'}; `gpu-run --on` switches it back on"
+    return None
+
+
+def take_lock():
+    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+    t0 = time.monotonic()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"gpu-run: waiting for the graphics card ({LOCK} is held by another GPU job)", file=sys.stderr)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd, round(time.monotonic() - t0, 1)
+
+
+# ---------- running the command ----------
+
+def set_subreaper():
+    """Orphaned grandchildren (browser helpers, servers) come back to gpu-run, so their CPU time
+    is counted when they are reaped."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        return False
+
+
+def children(exclude):
+    me, out = str(os.getpid()), []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) in exclude:
+            continue
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue
+        rest = stat[stat.rfind(")") + 2:].split()
+        if rest[1] == me and rest[0] != "Z":
+            out.append(stat[stat.find("(") + 1:stat.rfind(")")])
+    return out
+
+
+def reap():
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def run_job(args, command):
+    cpu_run = args.cpu
+    if not cpu_run:
+        why = off_reason()
+        if why:
+            print(f"gpu-run: not started: {why}", file=sys.stderr)
+            return 3
+    os.makedirs(STATE, exist_ok=True)
+    lock_fd, lock_wait = None, 0.0
+    if not (args.no_lock or cpu_run):
+        lock_fd, lock_wait = take_lock()
+    if args.only_when_idle is not None:  # checked after the wait for the lock, right before starting
+        why = not_idle_reason(args.only_when_idle)
+        if why:
+            print(f"gpu-run: not started: {why}", file=sys.stderr)
+            return 4
+    env = dict(os.environ)
+    if cpu_run:
+        env["TEST_NO_GPU"] = "1"
+    if lock_fd is not None:
+        # The party-games test helper takes /tmp/test-gpu-<n>.lock itself, n = 1..TEST_GPU_JOBS.
+        # gpu-run already holds slot 1 for this job, so give the command one more slot to take,
+        # instead of waiting on its own parent forever. Outside gpu-run nothing changes.
+        env["TEST_GPU_JOBS"] = str(max(1, int(env.get("TEST_GPU_JOBS", "1") or 1)) + 1)
+    reaper = set_subreaper()
+    sampler = Sampler(max_seconds=7 * 24 * 3600)
+    sampler.wait_ready()
+    first = len(sampler.samples)
+    load0 = loadavg()
+    ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    t0, start = time.monotonic(), time.time()
+    try:
+        proc = subprocess.Popen(command, env=env)
+    except OSError as e:
+        print(f"gpu-run: cannot run {command[0]}: {e}", file=sys.stderr)
+        sampler.stop()
+        return 127
+    signal.signal(signal.SIGINT, lambda *_: None)  # Ctrl-C reaches the command; we stay to log
+    signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
+    rc = proc.wait()
+    wall = time.monotonic() - t0
+    end = time.time()
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    keep = {sampler.proc.pid} if sampler.proc else set()
+    for _ in range(20):  # helpers often exit a moment after the command
+        reap()
+        if not children(keep):
+            break
+        time.sleep(0.1)
+    left = children(keep)
+    ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
+    sampler.stop()
+    if lock_fd is not None:
+        os.close(lock_fd)
+    rec = {
+        "v": 1,
+        "start": now_iso(start),
+        "end": now_iso(end),
+        "label": args.label,
+        "kind": args.kind,
+        "cpu_run": cpu_run,
+        "lock": "held" if lock_fd is not None else "none",
+        "lock_wait_s": lock_wait,
+        "cmd": short(shlex.join(command)),
+        "cwd": short(os.getcwd()),
+        "exit": rc if rc >= 0 else 128 - rc,
+        "wall_s": round(wall, 2),
+        "cpu_s": round(cpu, 2),
+        "avg_cores": round(cpu / wall, 2) if wall > 0 else None,
+        "cpu_complete": reaper and not left,
+        "left_running": left,
+        "loadavg_start": load0,
+        "loadavg_end": loadavg(),
+        "gpu": sampler.summary(first),
+        "driver_events": driver_events(start, end),
+    }
+    write_record(rec)
+    return rec["exit"]
+
+
+def run_watch(args):
+    os.makedirs(STATE, exist_ok=True)
+    seconds = args.watch
+    sampler = Sampler(max_seconds=seconds + 60)
+    sampler.wait_ready()
+    first = len(sampler.samples)
+    load0, start = loadavg(), time.time()
+    deadline = time.monotonic() + seconds
+    try:
+        while time.monotonic() < deadline and (not sampler.proc or sampler.proc.poll() is None):
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    end = time.time()
+    sampler.stop()
+    rec = {
+        "v": 1, "start": now_iso(start), "end": now_iso(end), "label": args.label or "desktop baseline",
+        "kind": "watch", "cpu_run": False, "lock": "none", "lock_wait_s": 0.0, "cmd": None,
+        "cwd": short(os.getcwd()), "exit": 0, "wall_s": round(end - start, 2), "cpu_s": None,
+        "avg_cores": None, "loadavg_start": load0, "loadavg_end": loadavg(),
+        "gpu": sampler.summary(first), "driver_events": driver_events(start, end),
+    }
+    write_record(rec)
+    return 0
+
+
+def write_record(rec):
+    with open(LOG, "a") as f:
+        f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    g = rec["gpu"]
+    cpu = "" if rec["cpu_s"] is None else f", CPU {rec['cpu_s']} s ({rec['avg_cores']} cores)"
+    mode = " on the CPU" if rec["cpu_run"] else ""
+    load = rec["loadavg_start"][0] if rec["loadavg_start"] else "?"
+    print(f"gpu-run: {rec['label']} ({rec['kind']}{mode}) exit {rec['exit']} in {rec['wall_s']} s{cpu}, load average {load}")
+    if "error" in g and not g.get("adapter"):
+        print(f"card: not sampled ({g['error']})")
+    else:
+        if g.get("load_peak") is None:
+            load = "load not measured (shorter than one sample)"
+        else:
+            busiest = next(iter(g.get("engines_peak") or {}), None)
+            load = f"load peak {g['load_peak']}% avg {g['load_avg']}%" + (f" (busiest engine: {busiest})" if busiest else "")
+        print(f"card: {g['adapter']} {load}, "
+              f"memory peak {g['vram_used_peak_gb']} of {g['vram_total_gb']} GB ({g['vram_free_before_gb']} GB free before), {g['samples']} samples")
+    ev = rec["driver_events"]
+    if ev is None:
+        print(f"driver events: not checked; logged to {short(LOG)}")
+    elif not ev:
+        print(f"driver events: none; logged to {short(LOG)}")
+    else:
+        first = ev[0]
+        print(f"DRIVER EVENTS: {len(ev)} ({first['provider']} {first['id']} at {first['time']}); logged to {short(LOG)}")
+
+
+# ---------- report ----------
+
+def parse_since(text):
+    try:
+        return datetime.fromisoformat(text).astimezone()
+    except ValueError:
+        sys.exit(f"gpu-run: --since wants a date like 2026-11-15, not {text!r}")
+
+
+def read_log(since):
+    rows = []
+    try:
+        with open(LOG) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if since and datetime.fromisoformat(r["start"]) < since:
+                    continue
+                rows.append(r)
+    except FileNotFoundError:
+        pass
+    return rows
+
+
+def fmt(x, unit=""):
+    return "-" if x is None else f"{x:g}{unit}" if isinstance(x, (int, float)) else str(x)
+
+
+def report(since):
+    rows = read_log(since)
+    out = [f"# GPU jobs{' since ' + since.date().isoformat() if since else ''}", ""]
+    if not rows:
+        out.append("No jobs logged.")
+        return "\n".join(out)
+    out += [f"{len(rows)} records, {rows[0]['start']} to {rows[-1]['end']}.", ""]
+    out += ["## By kind", "",
+            "| Kind | Runs | Failed | Median wall | Worst wall | Peak card load | Peak video memory |",
+            "|---|---|---|---|---|---|---|"]
+    kinds = {}
+    for r in rows:
+        kinds.setdefault(r["kind"] + (" (CPU)" if r.get("cpu_run") else ""), []).append(r)
+    for k, rs in sorted(kinds.items()):
+        walls = [r["wall_s"] for r in rs]
+        loads = [r["gpu"].get("load_peak") for r in rs if r["gpu"].get("load_peak") is not None]
+        vram = [r["gpu"].get("vram_used_peak_gb") for r in rs if r["gpu"].get("vram_used_peak_gb") is not None]
+        out.append(f"| {k} | {len(rs)} | {sum(1 for r in rs if r['exit'])} | {statistics.median(walls):g} s | {max(walls):g} s | "
+                   f"{fmt(max(loads) if loads else None, '%')} | {fmt(max(vram) if vram else None, ' GB')} |")
+    pairs = []
+    labels = {}
+    for r in rows:
+        if r["kind"] != "watch" and r["exit"] == 0:
+            labels.setdefault(r["label"], {"card": [], "cpu": []})["cpu" if r.get("cpu_run") else "card"].append(r)
+    for label, d in labels.items():
+        if d["card"] and d["cpu"]:
+            cw = statistics.median(r["wall_s"] for r in d["card"])
+            pw = statistics.median(r["wall_s"] for r in d["cpu"])
+            cc = [r["cpu_s"] for r in d["card"] if r["cpu_s"] is not None]
+            pc = [r["cpu_s"] for r in d["cpu"] if r["cpu_s"] is not None]
+            cc, pc = (statistics.median(cc) if cc else None), (statistics.median(pc) if pc else None)
+            pairs.append(f"| {label} | {len(d['card'])} / {len(d['cpu'])} | {cw:g} s | {pw:g} s | {pw / cw:.1f}x | "
+                         f"{fmt(cc, ' s')} | {fmt(pc, ' s')} | {(pc / cc if cc and pc else 0):.1f}x |")
+    out += ["", "## Card against CPU (same label, passing runs, medians)", ""]
+    if pairs:
+        out += ["| Label | Runs card / CPU | Wall on card | Wall on CPU | Wall speed-up | CPU time on card | CPU time on CPU | CPU saved |",
+                "|---|---|---|---|---|---|---|---|"] + pairs
+    else:
+        out.append("No label has both a card run and a `--cpu` run yet.")
+    hit = [r for r in rows if r.get("driver_events")]
+    out += ["", "## Jobs during a driver event", ""]
+    if hit:
+        for r in hit:
+            for e in r["driver_events"]:
+                out.append(f"- {r['start']} {r['label']} ({r['kind']}, exit {r['exit']}): {e['provider']} {e['id']} at {e['time']}: {e['text']}")
+    else:
+        unchecked = sum(1 for r in rows if r.get("driver_events") is None)
+        out.append("None." + (f" ({unchecked} records could not check the event log.)" if unchecked else ""))
+    watches = [r for r in rows if r["kind"] == "watch"]
+    if watches:
+        out += ["", "## Baselines (--watch)", "", "| Start | Label | Seconds | Card load avg / peak | Video memory in use | Top users |", "|---|---|---|---|---|---|"]
+        for r in watches:
+            g = r["gpu"]
+            top = ", ".join(f"{n} {b} GB" for n, b in g.get("top_vram_gb", [])[:3])
+            out.append(f"| {r['start']} | {r['label']} | {r['wall_s']:g} | {fmt(g.get('load_avg'), '%')} / {fmt(g.get('load_peak'), '%')} | "
+                       f"{fmt(g.get('vram_used_peak_gb'), ' GB')} of {fmt(g.get('vram_total_gb'), ' GB')} | {top} |")
+    return "\n".join(out)
+
+
+def events(since):
+    start = (since or datetime.now().astimezone() - timedelta(days=7)).timestamp()
+    rows = driver_events(start, time.time())
+    if rows is None:
+        print("gpu-run: could not query the Windows event logs")
+        return 1
+    if not rows:
+        print("No display driver events.")
+    for e in rows:
+        print(f"{e['time']}  {e['log']}/{e['provider']} {e['id']}: {e['text']}")
+    return 0
+
+
+# ---------- main ----------
+
+def main(argv):
+    command = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, command = argv[:i], argv[i + 1:]
+    ap = argparse.ArgumentParser(prog="gpu-run", description="Run a command as a graphics-card job and log what happened.")
+    ap.add_argument("--label", help="what this job is; the same label on a --cpu run makes a comparison")
+    ap.add_argument("--kind", choices=KINDS, default="other")
+    ap.add_argument("--cpu", action="store_true", help="a CPU comparison run: no lock, TEST_NO_GPU=1 for the command")
+    ap.add_argument("--no-lock", action="store_true", help="do not take the shared card lock")
+    ap.add_argument("--only-when-idle", type=float, metavar="MINUTES",
+                    help="refuse (exit 4) unless the owner has not touched the PC for MINUTES and nothing runs full screen")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--watch", type=float, metavar="SECONDS", help="sample the card without running a command")
+    mode.add_argument("--report", action="store_true", help="print a Markdown report of the log")
+    mode.add_argument("--events", action="store_true", help="list display driver events (default: last 7 days)")
+    mode.add_argument("--off", metavar="REASON", help="switch GPU jobs off everywhere")
+    mode.add_argument("--on", action="store_true", help="switch GPU jobs back on")
+    ap.add_argument("--since", help="with --report or --events: from this date (YYYY-MM-DD)")
+    args = ap.parse_args(argv)
+    since = parse_since(args.since) if args.since else None
+    if args.report:
+        print(report(since))
+        return 0
+    if args.events:
+        return events(since)
+    if args.off is not None:
+        os.makedirs(STATE, exist_ok=True)
+        with open(OFF, "w") as f:
+            f.write(f"{now_iso()} {args.off}\n")
+        print(f"gpu-run: the card is switched off for GPU jobs ({args.off}); `gpu-run --on` switches it back on")
+        return 0
+    if args.on:
+        try:
+            os.unlink(OFF)
+            print("gpu-run: the card is switched on for GPU jobs")
+        except FileNotFoundError:
+            print("gpu-run: the card was already on")
+        return 0
+    if args.watch is not None:
+        if command:
+            ap.error("--watch takes no command")
+        if args.watch <= 0:
+            ap.error("--watch wants a number of seconds above 0")
+        return run_watch(args)
+    if not command:
+        ap.error("give a command after --, or one of --watch, --report, --events, --off, --on")
+    if not args.label:
+        ap.error("--label is required for a job")
+    return run_job(args, command)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

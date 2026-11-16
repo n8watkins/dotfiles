@@ -23,9 +23,13 @@
 - Downloads are at: `/mnt/c/Users/natha/Downloads`
 - When the user shares a screenshot or says "check my screenshot", read the most recent file from the Screenshots path above
 - Secrets live in `pass`, used only through `pass-env`; you know them by name (`shared/GEMINI_API_KEY`), never by value. Never open `.env*`, `.dev.vars`, `~/.password-store` or `~/.gnupg`, never print secret variables, never ask the owner to paste a key into chat, and never work around a denied command.
-- Each project lists its secrets by name in `.env.pass`. Run with `pass-env run -- <command>`, send one key with `pass-env pipe <entry> -- <command reading stdin>`, check with `pass-env check`; run and pipe go through for the known deploy and test tools and `gh secret set`, and ask the owner for anything else. Create keys we control with `pass-env generate <entry>`; for provider-issued keys ask the owner to run `! pass-env set <entry>`. If you see LOCKED, ask the owner to run `! pass-env unlock`.
+- Each project lists its secrets by name in `.env.pass`. Run with `pass-env run -- <command>`, send one key with `pass-env pipe <entry> -- <command reading stdin>`, check with `pass-env check`.
+  Using a secret this way in the owner's own projects and accounts needs no question: run the command yourself, and if a prompt appears, that prompt is the approval.
+  Code that needs a secret goes in a script file inside the project (`pass-env run -- node scripts/x.mjs`), never `-e`, `-c` or `sh -c`.
+  Create keys we control with `pass-env generate <entry>`; pipe a key a CLI can mint straight into `pass-env set <entry>`, never run that CLI bare.
+  Hand the owner a `!` command only for `pass-env set <entry>` of a key a dashboard issues, and `pass-env unlock` when you see LOCKED.
 - When dcg, a hook or a permission rule blocks or denies a command, decide whether the block is about the effect or only the method.
-  - Effect (a real block): the command deletes data, publishes or releases, reveals or moves a secret, changes permissions or access, or touches the secrets store, backups or Windows Hello.
+  - Effect (a real block): the command deletes data, publishes or releases, reveals a secret or sends it outside the owner's own accounts, changes permissions or access, or touches the secrets store, backups or Windows Hello.
     Stop and report it (to the owner, or to the agent that started you): the command, the message, and what you were trying to do.
     Never retry it in another form (another tool, a script, an interpreter, a full path, a wrapper), including a "safer" form the block message itself suggests, until the owner says how to proceed.
   - Method: the action is harmless and only the way it was run tripped the guard.

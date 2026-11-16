@@ -89,6 +89,8 @@
       "Bash(pass-env pipe *-- env*)",
       "Bash(pass-env pipe *-- xargs*)",
       "Bash(hushkey copy *)",
+      "Bash(pass-env generate *--copy*)",
+      "Bash(hushkey generate *--copy*)",
       "Bash(hushkey run *-- env*)",
       "Bash(hushkey run *-- printenv*)",
       "Bash(hushkey run *-- echo *)",

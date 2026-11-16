@@ -303,7 +303,7 @@ Full grades and evidence: `APP_SCORECARD.md` in the private `secret-handling-rev
 - `app.` serves the marketing page; shops and drivers sign in on separate `/login` pages.
 - Em dashes in the title, manifest name and hero copy; system font; an auto-rotating hero card.
 
-### Cutely Ask (`~/projects/cutelyaskme`, https://cutelyaskme.nathancwatkins23.workers.dev)
+### Cutely Ask (`~/projects/apps/cutelyaskme`, https://cutelyaskme.nathancwatkins23.workers.dev)
 
 - The 404 renders unstyled; the desktop home is a small card on an empty page.
 - One product, three names (Cutely Ask, Date Night, cutelyaskme), and an em dash in the title.

@@ -12,7 +12,10 @@ Do not retype global rules (dashes, co-author lines, `trash`, branches and pull 
 
 - One agent per area of the code.
   Two agents editing the same files cost more in merges than they save.
-- At most three build agents at once on this PC; check `free -h` and `uptime` first.
+- There is no fixed cap on agents at once on this PC (nine ran together on 2026-11-15, on 14 threads and 16 GB); check `free -h` and `uptime` first.
+  The limits are heavy jobs and review, not the number of agents.
+  Heavy jobs (browser tests, renders, builds) run through `devguard slot -- <command>`, and a timing result measured on a saturated machine is not evidence.
+  Do not launch more lanes than you can verify: every report is a claim until its diff is read and its tests are run again.
 - Pick the model by the kind of work, and always name it in the spawn call so the agent does not inherit the session's model:
   - the most capable model only for structure, live multiplayer or concurrency, and a first-pass look;
   - the middle model for a build with a clear specification;

@@ -67,14 +67,17 @@ When both answer, the stricter answer wins.
 The Cloudflare MCP connector gives agents write access to the whole account, and Cloudflare has no "may edit, may not delete" permission.
 Its `execute` tool runs a JavaScript function that calls `cloudflare.request({ method, path, body })`, so `confirm-cloudflare-delete.sh` reads that code before it runs (it matches any tool whose name ends in `cloudflare-api__execute`, whatever the plugin prefix).
 
-- It asks before any DELETE request (any case or quoting), naming the paths it can read.
-- It asks when a method is not one of the literals GET, POST, PUT or PATCH: a variable, a concatenation, a ternary, a template with `${...}`.
-- It asks for a short list of other calls that destroy data or cannot be undone, kept in the `DESTRUCTIVE` table at the top of the script: purging a zone's whole cache, DROP, DELETE or TRUNCATE sent to a D1 `query` or `raw` path, R2 lifecycle and lock rules, a Worker upload whose migrations delete a Durable Object class (`deleted_classes`), KV bulk delete, Registrar, and API tokens.
-- It asks when it cannot parse the input.
-- Everything else (GET-only code, ordinary writes, the word "delete" in a comment, body or path) passes silently in about 35 ms.
+- It asks before any DELETE request (any case, quoting or escape such as `"DELETE"`), naming the paths it can read.
+- It reads constants, concatenations and ternaries of literals, and asks when a method still cannot be read as GET, POST, PUT or PATCH: a variable it cannot follow to one literal, a call, a getter, a repeated `method` key.
+- A backstop asks when the code could set a method where the reader does not look: a string that is exactly DELETE outside a plain key value or comparison, JSON text with `"method":"DELETE"`, a computed key on a request object, or `eval`, `Function`, `Reflect`, `defineProperty`, `fromEntries`, `fromCharCode` or `atob`.
+- It asks for the calls in the `DESTRUCTIVE` table at the top of the script, matched against each request's own path (concatenations and templates included): purging a zone's whole cache; DROP, DELETE, TRUNCATE or an UPDATE without WHERE in the SQL sent to D1; D1 restore and import; R2 lifecycle and lock rules; a Worker upload (Workers for Platforms too) whose migrations carry `deleted_classes`; KV bulk delete; DNS batch deletes; Vectorize `delete_by_ids`; queue purge; turning off Email Routing; pausing a zone; whole-set replacements of a ruleset phase, a list's items or an Access app's policies; rotating a Turnstile secret; any Registrar or API token write; and sending email.
+- It asks when it cannot parse the input, and it fails closed: its own errors ask, and the registration in `settings.json` sets `timeout: 10` and `onFailure: "block"` (Claude Code 2.1.295 or later), so a crash, a stall or a missing `python3` stops the call.
+- Everything else passes silently: GET-only code, ordinary writes, and the word "delete" in a comment, key, key value, comparison, path segment, Worker source or a body other than D1 SQL.
+  A call takes about 35 ms, a 1.2 MB Worker upload about 60 ms.
 
-It reads the code without running it, so code written to hide its method (`eval`, `JSON.parse`, a method set somewhere other than a `method:` key or a `.method =` assignment) gets past it.
-For `wrangler`, the `permissions.ask` rules in `settings.json` ask before every delete, `d1 execute --remote`, `queues purge`, `rollback` and R2 lifecycle change, next to dcg and `confirm-destructive-git.sh`.
+It reads the code without running it, so a method computed from pieces it cannot see (a value fetched at run time, char-code arithmetic without the names above) gets past it.
+For `wrangler`, the `permissions.ask` rules in `settings.json` start at the launcher (`wrangler`, `npx`, `pnpm`, `bunx`, `bun`, `yarn`, `pass-env`, `hushkey`, `node_modules/.bin`) and ask before every `... delete`, `d1 execute --remote`, `d1 time-travel restore`, `queues purge`, `rollback` and R2 lifecycle and lock change, also with flags before the subcommand; text that only mentions wrangler (a commit message, `grep`) does not match.
+`confirm-destructive-git.sh` also asks before `wrangler deploy` or `versions upload` when the config adds a `deleted_classes` migration that is not yet on the default branch.
 The agent rules are in the `cloudflare-access` playbook.
 
 To override a block (owner only):

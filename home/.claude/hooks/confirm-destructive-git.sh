@@ -13,7 +13,9 @@
 # command they start gets every check a bare one gets.
 # Hushkey (owner, 2026-11-10): run/pipe --no-mask, restic, the backup files,
 # unit and script, Windows Hello unlock and helper runs, wrangler commands that
-# delete, roll back, purge, restore or change exposure (2026-11-15), and
+# delete, roll back, purge, restore or change exposure (2026-11-15), wrangler
+# deploy or versions upload of a config with a new deleted_classes migration
+# (2026-11-16), and
 # releases (v* tags, gh release, publish, release scripts, gh api writes to
 # pending_deployments, environments and rulesets).
 # This hook only asks. Most of those are also denied for agents by the
@@ -934,7 +936,7 @@ WRANGLER_EXPOSE = {"lifecycle": "changes how long an R2 bucket keeps objects",
                    "domain": "changes a custom domain", "domains": "changes a custom domain",
                    "lock": "changes the lock rules of an R2 bucket"}
 
-def wrangler_reason(argv):
+def wrangler_reason(argv, here):
     """argv is unwrapped and launcher-free (check() recurses through npx and friends)."""
     if not argv or tool_name(argv[0]) != "wrangler":
         return None
@@ -944,6 +946,92 @@ def wrangler_reason(argv):
             return WRANGLER_DESTROY[w]
         if w in WRANGLER_EXPOSE and pos[i + 1:i + 2] not in (["list"], ["get"]):
             return WRANGLER_EXPOSE[w]
+    if "deploy" in pos or ("versions" in pos and "upload" in pos):
+        return deleted_classes_reason(argv[1:], here)
+    return None
+
+# A Durable Object migration with deleted_classes deletes the class and every
+# object it stored, and `wrangler deploy` (allowed) applies it (review,
+# 2026-11-16). Ask when the config has a deleted_classes entry that is not in
+# the same file both at HEAD and on the remote default branch, or when that
+# cannot be told (no git, the file is not committed, no remote).
+WRANGLER_CONFIGS = ("wrangler.json", "wrangler.jsonc", "wrangler.toml")
+DELETED_CLASSES = re.compile(r"deleted_classes[\"\x27]?\s*[:=]\s*\[([^\]]*)\]")
+
+def deleted_class_names(text):
+    """The class names listed in deleted_classes; "?" for a form not read."""
+    names, found = set(), 0
+    for m in DELETED_CLASSES.finditer(text):
+        found += 1
+        names.update(re.findall(r"[\"\x27]([^\"\x27]+)[\"\x27]", m.group(1)))
+    if text.count("deleted_classes") > found:
+        names.add("?")
+    return names
+
+def wrangler_config(args, here):
+    """The config file wrangler deploy reads, or None."""
+    base, config, i = here, None, 0
+    while i < len(args):
+        a = args[i]
+        for flag in ("--config", "-c", "--cwd"):
+            if a == flag and i + 1 < len(args):
+                value, i = args[i + 1], i + 1
+            elif a.startswith(flag + "="):
+                value = a.split("=", 1)[1]
+            else:
+                continue
+            if flag == "--cwd":
+                base = os.path.join(here, os.path.expanduser(value))
+            else:
+                config = value
+        i += 1
+    if config:
+        return os.path.join(base, os.path.expanduser(config))
+    d = os.path.abspath(base)
+    while True:
+        for name in WRANGLER_CONFIGS:
+            if os.path.isfile(os.path.join(d, name)):
+                return os.path.join(d, name)
+        if os.path.exists(os.path.join(d, ".git")) or os.path.dirname(d) == d:
+            return None
+        d = os.path.dirname(d)
+
+def git_out(path, *args):
+    try:
+        r = subprocess.run(["git", "-C", path] + list(args), capture_output=True, text=True, timeout=3)
+        return r.stdout if r.returncode == 0 else None
+    except Exception:
+        return None
+
+def deleted_classes_reason(args, here):
+    path = wrangler_config(args, here)
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            names = deleted_class_names(f.read())
+    except OSError:
+        return None  # wrangler cannot read it either
+    if not names:
+        return None
+    reason = ("deploys a Worker whose wrangler config deletes a Durable Object class (" +
+              ", ".join(sorted(names)) + ") and all its data")
+    folder = os.path.dirname(path)
+    top = (git_out(folder, "rev-parse", "--show-toplevel") or "").strip()
+    if not top:
+        return reason
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(top))
+    head = git_out(top, "show", "HEAD:" + rel)
+    ref = (git_out(top, "symbolic-ref", "-q", "refs/remotes/origin/HEAD") or "").strip()
+    refs = [ref] if ref else ["refs/remotes/origin/main", "refs/remotes/origin/master"]
+    remote = next((t for t in (git_out(top, "show", r + ":" + rel) for r in refs) if t is not None), None)
+    if head is None or remote is None:
+        return reason
+    old = deleted_class_names(head) & deleted_class_names(remote)
+    new = names - old
+    if new:
+        return ("deploys a Worker whose wrangler config adds a deleted_classes migration (" +
+                ", ".join(sorted(new)) + "): it deletes a Durable Object class and all its data")
     return None
 
 def release_reason(argv):
@@ -1079,7 +1167,7 @@ def check_known(raw, argv, here):
         reason = (scan(call, here) if call else None) or (check(inner, here) if inner else None)
         if reason:
             return reason
-    reason = wrangler_reason(argv) or release_reason(argv)
+    reason = wrangler_reason(argv, here) or release_reason(argv)
     if reason:
         return reason
     if prog in SECRET_TOOLS and len(argv) > 1:

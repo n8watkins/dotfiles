@@ -19,13 +19,15 @@ If a task seems to need one of those, stop and ask the owner; do not look for an
 `~/.claude/hooks/confirm-cloudflare-delete.sh` reads the code of every `execute` call and asks the owner before it runs when the code:
 
 - sends any DELETE request;
-- sets a method that is not one of the literals GET, POST, PUT or PATCH (a variable, a concatenation, a ternary);
-- purges a zone's whole cache, sends DROP, DELETE or TRUNCATE to a D1 database, changes R2 lifecycle or lock rules, uploads a Worker whose migrations carry `deleted_classes`, bulk-deletes KV keys, or touches Registrar or API tokens.
+- sets a method it cannot read as GET, POST, PUT or PATCH (a variable it cannot follow to one literal, a call, a getter, a repeated key), or could set one where it does not look (a lone `"DELETE"` string, JSON text, a computed key, `eval`, `Reflect` and similar);
+- purges a zone's whole cache, sends destructive SQL to D1 or restores or imports a D1 database, changes R2 lifecycle or lock rules, uploads a Worker whose migrations carry `deleted_classes`, deletes KV keys, DNS records or vectors in bulk, purges a queue, turns off Email Routing, pauses a zone, replaces a whole ruleset phase, list or set of Access policies, rotates a Turnstile secret, touches Registrar or API tokens, or sends email.
 
-For wrangler, `permissions.ask` in `~/.claude/settings.json` asks before every delete, `d1 execute --remote`, `queues purge`, `rollback` and R2 lifecycle change, and dcg blocks Worker, D1 and R2 deletes outright.
+For wrangler, `permissions.ask` in `~/.claude/settings.json` asks before every `... delete`, `d1 execute --remote`, `d1 time-travel restore`, `queues purge`, `rollback` and R2 lifecycle or lock change, `confirm-destructive-git.sh` asks before a deploy that adds a `deleted_classes` migration, and dcg blocks Worker, D1 and R2 deletes outright.
 
-Write the method as a plain literal (`method: "GET"`) so the guard can read it; a computed method always asks.
-An ask in a background agent is a refusal: report what you wanted to delete and why, and stop.
+Write the method as a plain literal (`method: "GET"`) so the guard can read it.
+A constant, a concatenation or a ternary of literals is read too; anything it cannot follow asks.
+When the guard asks from a subagent, the prompt goes to the owner's main session and the call waits for his answer.
+In a headless run (`claude -p`, no one to answer) the ask becomes a refusal: report what you wanted to change and why, and stop.
 Never split, rename, encode or move a blocked call to another door (connector to wrangler, or the reverse).
 
 ## Before deleting anything

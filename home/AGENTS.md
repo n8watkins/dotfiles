@@ -49,7 +49,7 @@
     - Restoring a file from git (`git checkout -- <file>`, `git restore`): ask the owner, or redo the change with Edit.
 - Cloudflare (connector or `wrangler`): anything that deletes or cannot be undone (a Worker, a Durable Object class or its data, a KV namespace, an R2 bucket or objects, a D1 database or table, a DNS record, an Access policy, an email route) needs the owner's word for that specific thing.
   Export stored data first where an export exists.
-  The guard asks before these; in a background agent that ask is a refusal to report, not to work around. (Playbook: `cloudflare-access`.)
+  The guard asks before these: a subagent's prompt goes to the owner's main session and waits for his answer, and a headless run (`-p`, no one to answer) gets a refusal to report, not to work around. (Playbook: `cloudflare-access`.)
 
 ## Maintaining this file
 

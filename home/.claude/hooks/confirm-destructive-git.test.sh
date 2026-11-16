@@ -802,6 +802,43 @@ rule ask  'npx wrangler@4.151.3 r2 bucket lock remove my-bucket --id x'
 rule ask  'wrangler r2 bucket lock set my-bucket --file lock.json'
 rule ask  'npx wrangler r2 bucket lock add my-bucket rule data/'
 rule ask  'npx wrangler r2 object delete my-bucket/key'
+# Other wrangler deletes and irreversible calls ask too (2026-11-16, before the
+# Cloudflare connector got account-wide write access).
+for w in 'npx wrangler' 'wrangler' 'pnpm exec wrangler' 'npx wrangler@4.151.3'; do
+  rule ask "$w delete"
+  rule ask "$w delete --name old-worker"
+  rule ask "$w d1 delete my-db -y"
+  rule ask "$w d1 execute my-db --remote --command \"SELECT 1\""
+  rule ask "$w d1 execute my-db --command x --remote"
+  rule ask "$w kv namespace delete --namespace-id x"
+  rule ask "$w kv key delete k --binding KV"
+  rule ask "$w kv bulk delete keys.json --binding KV"
+  rule ask "$w queues delete q"
+  rule ask "$w queues purge q"
+  rule ask "$w secret delete K"
+  rule ask "$w pages secret delete K --project-name site"
+  rule ask "$w secrets-store secret delete store1 --secret-id x"
+  rule ask "$w pages project delete site"
+  rule ask "$w pages deployment delete abc --project-name site"
+  rule ask "$w vectorize delete idx"
+  rule ask "$w hyperdrive delete id"
+  rule ask "$w rollback"
+  rule ask "$w r2 bucket lifecycle add b r1 --expire-days 1"
+  rule ask "$w r2 bucket lifecycle remove b --id r1"
+  rule ask "$w r2 bucket lifecycle set b --file rules.json"
+  rule ask "pass-env run -- $w d1 delete my-db"
+  rule allow "$w d1 execute my-db --local --command \"SELECT 1\""
+  rule allow "$w d1 export my-db --remote --output backup.sql"
+  rule allow "$w d1 list"
+  rule allow "$w kv key list --binding KV"
+  rule allow "$w r2 bucket lifecycle list b"
+  rule allow "$w versions upload"
+  rule allow "$w versions list"
+  rule allow "$w tail"
+done
+rule allow 'npx wrangler deploy'
+rule allow 'pass-env run -- npx wrangler deploy --env production'
+rule allow 'npx wrangler d1 migrations apply pr-post --remote'
 
 # 4. Output masking stays on (H6).
 run ask   "$tmp/feat" 'pass-env run --no-mask -- npm test'

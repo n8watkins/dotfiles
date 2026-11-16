@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Tests for bin/gpu-run that need no graphics card: argument parsing, the off switch, the lock,
+# the log line (with a fake sampler, event query and idle check) and the report from a fixture.
+# Run: bin/gpu-run.test.sh
+set -euo pipefail
+run="$(cd "$(dirname "$0")" && pwd)/gpu-run"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+export GPU_RUN_STATE="$tmp/state" GPU_RUN_LOCK="$tmp/card.lock"
+unset TEST_NO_GPU TEST_GPU_JOBS
+log="$GPU_RUN_STATE/jobs.jsonl"
+GiB=1073741824
+
+# A fake sampler: one sample, a pause (so the job starts after it), then busier samples.
+cat >"$tmp/sampler" <<EOF
+#!/bin/sh
+echo '{"t":1,"load":null,"types":{},"used":$((4 * GiB)),"top":[["dwm",$((2 * GiB))]],"cpu":1.0,"adapter":"Test Card","total":$((16 * GiB))}'
+sleep 1
+while :; do
+  echo '{"t":2,"load":50.5,"types":{"3d":50.5,"compute 0":12},"used":$((7 * GiB)),"top":[["blender",$((3 * GiB))],["dwm",$((2 * GiB))]],"cpu":1.5}'
+  sleep 0.1
+done
+EOF
+printf '#!/bin/sh\necho "[]"\n' >"$tmp/no-events"
+printf '#!/bin/sh\necho %s\n' "'{\"time\":\"2026-11-15T20:36:35-08:00\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}'" >"$tmp/one-event"
+printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":2,\"state\":5}'" >"$tmp/idle-2"
+printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":60,\"state\":3}'" >"$tmp/fullscreen"
+chmod +x "$tmp"/sampler "$tmp"/no-events "$tmp"/one-event "$tmp"/idle-2 "$tmp"/fullscreen
+export GPU_RUN_SAMPLER="$tmp/sampler" GPU_RUN_EVENTS="$tmp/no-events"
+
+fail=0 n=0
+ok() { n=$((n + 1)); if ! eval "$2"; then fail=$((fail + 1)); echo "FAIL: $1"; fi; }
+last() { tail -n 1 "$log" | jq -r "$1"; }
+
+# Arguments.
+rc=0; "$run" >/dev/null 2>&1 || rc=$?
+ok "no arguments is a usage error" '[ "$rc" = 2 ]'
+rc=0; "$run" -- true >/dev/null 2>&1 || rc=$?
+ok "a job needs a label" '[ "$rc" = 2 ]'
+rc=0; "$run" --label x --kind nonsense -- true >/dev/null 2>&1 || rc=$?
+ok "an unknown kind is refused" '[ "$rc" = 2 ]'
+rc=0; "$run" --watch 1 -- true >/dev/null 2>&1 || rc=$?
+ok "--watch takes no command" '[ "$rc" = 2 ]'
+rc=0; "$run" --report --since yesterday >/dev/null 2>&1 || rc=$?
+ok "a bad --since date is refused" '[ "$rc" != 0 ]'
+
+# A job: exit code, log line, card figures, no environment, home shortened.
+out="$(SECRET_MARKER=hunter2 "$run" --label "probe" --kind browser-test -- sh -c 'sleep 1.5; exit 7' "$HOME/x" 2>&1)" && rc=0 || rc=$?
+ok "the command's exit code comes back" '[ "$rc" = 7 ]'
+ok "one JSON line per job" '[ "$(wc -l <"$log")" = 1 ] && jq -e . "$log" >/dev/null'
+ok "label, kind and exit are logged" '[ "$(last "[.label,.kind,.exit,.cpu_run,.lock] | @tsv")" = "$(printf "probe\tbrowser-test\t7\tfalse\theld")" ]'
+ok "the home path is shortened" '[[ "$(last .cmd)" == *"~/x"* ]] && ! grep -q "$HOME" "$log"'
+ok "no environment in the log" '! grep -q hunter2 "$log"'
+ok "peak load from the samples" '[ "$(last .gpu.load_peak)" = 50.5 ]'
+ok "peak video memory" '[ "$(last ".gpu.vram_used_peak_gb == 7")" = true ]'
+ok "free video memory before the job" '[ "$(last ".gpu.vram_free_before_gb == 12")" = true ]'
+ok "top processes by video memory" '[ "$(last ".gpu.top_vram_gb[0][0]")" = blender ]'
+ok "wall time is measured" '[ "$(last ".wall_s >= 1.4")" = true ]'
+ok "load average is logged" '[ "$(last ".loadavg_start | length")" = 3 ]'
+ok "no driver events" '[ "$(last ".driver_events | length")" = 0 ]'
+ok "a three-line summary" '[ "$(wc -l <<<"$out")" = 3 ] && [[ "$out" == *"Test Card load peak 50.5%"* ]]'
+
+# CPU time counts orphaned grandchildren too.
+"$run" --label busy -- sh -c 'python3 -c "import time
+t = time.process_time()
+while time.process_time() - t < 0.6: pass" & exit 0' >/dev/null
+ok "CPU time includes an orphaned grandchild" '[ "$(last ".cpu_s >= 0.5")" = true ] && [ "$(last .cpu_complete)" = true ]'
+
+# The lock: a job waits while another holds it, and holds it while it runs.
+flock "$GPU_RUN_LOCK" sleep 2 &
+holder=$!
+sleep 0.3
+out="$("$run" --label wait -- true 2>&1)"
+wait "$holder"
+ok "a job waits for the lock and says so" '[[ "$out" == *"waiting for the graphics card"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
+"$run" --label held -- sh -c '! flock -n "$GPU_RUN_LOCK" true && [ "$TEST_GPU_JOBS" = 2 ]' >/dev/null
+ok "the lock is held during the job, and the command gets a second test slot" '[ "$(last .exit)" = 0 ]'
+"$run" --no-lock --label free -- sh -c 'flock -n "$GPU_RUN_LOCK" true && [ -z "${TEST_GPU_JOBS:-}" ]' >/dev/null
+ok "--no-lock leaves the lock and the environment alone" '[ "$(last ".exit,.lock" | tr "\n" " ")" = "0 none " ]'
+
+# The off switch.
+"$run" --off "driver error at 20:36" >/dev/null
+lines="$(wc -l <"$log")"
+rc=0; out="$("$run" --label blocked -- true 2>&1)" || rc=$?
+ok "a job refuses while the card is off" '[ "$rc" = 3 ] && [[ "$out" == *"driver error at 20:36"* ]] && [ "$(wc -l <"$log")" = "$lines" ]'
+"$run" --cpu --label probe -- sh -c '[ "$TEST_NO_GPU" = 1 ]' >/dev/null
+ok "a --cpu run goes ahead with TEST_NO_GPU=1 and no lock" '[ "$(last ".exit,.cpu_run,.lock" | tr "\n" " ")" = "0 true none " ]'
+"$run" --watch 1.5 --label rest >/dev/null
+ok "--watch samples while the card is off" '[ "$(last ".kind,.cmd" | tr "\n" " ")" = "watch null " ] && [ "$(last .gpu.samples)" -ge 1 ]'
+"$run" --on >/dev/null
+rc=0; TEST_NO_GPU=1 "$run" --label envoff -- true >/dev/null 2>&1 || rc=$?
+ok "TEST_NO_GPU=1 also refuses" '[ "$rc" = 3 ]'
+rc=0; "$run" --label on-again -- true >/dev/null || rc=$?
+ok "--on switches it back on" '[ "$rc" = 0 ]'
+
+# Idle gate.
+rc=0; out="$(GPU_RUN_IDLE="$tmp/idle-2" "$run" --only-when-idle 10 --label idle -- true 2>&1)" || rc=$?
+ok "--only-when-idle refuses while the owner is active" '[ "$rc" = 4 ] && [[ "$out" == *"2 minutes ago"* ]]'
+rc=0; GPU_RUN_IDLE="$tmp/idle-2" "$run" --only-when-idle 1 --label idle -- true >/dev/null || rc=$?
+ok "--only-when-idle runs once idle long enough" '[ "$rc" = 0 ]'
+rc=0; out="$(GPU_RUN_IDLE="$tmp/fullscreen" "$run" --only-when-idle 1 --label idle -- true 2>&1)" || rc=$?
+ok "--only-when-idle refuses during a full-screen game" '[ "$rc" = 4 ] && [[ "$out" == *"full-screen"* ]]'
+
+# A driver event during a job is logged and loud.
+out="$(GPU_RUN_EVENTS="$tmp/one-event" "$run" --label crashy --kind blender -- true)"
+ok "a driver event is logged" '[ "$(last ".driver_events[0].id")" = 1001 ] && [[ "$out" == *"DRIVER EVENTS: 1"* ]]'
+
+# The report, from a fixture log.
+export GPU_RUN_STATE="$tmp/fixture"
+mkdir -p "$GPU_RUN_STATE"
+row() { # row start label kind cpu_run wall cpu exit events
+  printf '{"v":1,"start":"%s","end":"%s","label":"%s","kind":"%s","cpu_run":%s,"wall_s":%s,"cpu_s":%s,"exit":%s,"gpu":{"load_peak":60,"vram_used_peak_gb":8.5},"driver_events":%s}\n' "$1" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+}
+{
+  row 2026-11-10T10:00:00-08:00 old other false 9 1 0 '[]'
+  row 2026-11-15T10:00:00-08:00 room-pick browser-test false 40 25 0 '[]'
+  row 2026-11-15T10:05:00-08:00 room-pick browser-test false 42 26 0 '[]'
+  row 2026-11-15T10:10:00-08:00 room-pick browser-test true 120 550 0 '[]'
+  row 2026-11-15T10:20:00-08:00 cube blender false 5 1 1 '[{"time":"2026-11-15T10:20:03-08:00","provider":"Windows Error Reporting","id":1001,"text":"LiveKernelEvent 141"}]'
+  echo 'not json'
+} >"$GPU_RUN_STATE/jobs.jsonl"
+rep="$("$run" --report --since 2026-11-15)"
+ok "the report skips jobs before --since" '[[ "$rep" != *"| old |"* ]] && [[ "$rep" == *"4 records"* ]]'
+ok "the report counts runs and failures by kind" '[[ "$rep" == *"| browser-test | 2 | 0 | 41 s | 42 s | 60% | 8.5 GB |"* ]] && [[ "$rep" == *"| blender | 1 | 1 |"* ]]'
+ok "the report shows the card against the CPU" '[[ "$rep" == *"| room-pick | 2 / 1 | 41 s | 120 s | 2.9x | 25.5 s | 550 s | 21.6x |"* ]]'
+ok "the report lists jobs during a driver event" '[[ "$rep" == *"cube (blender, exit 1): Windows Error Reporting 1001"* ]]'
+
+echo "$((n - fail))/$n passed"
+[ "$fail" = 0 ]

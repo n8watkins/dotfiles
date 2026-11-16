@@ -5,8 +5,10 @@ description: Use when a task would run a render, a browser test, a model or any 
 
 # Jobs on the graphics card
 
-- Run every card job through `gpu-run --label "<what>" --kind <kind> -- <command>`: it waits for the shared lock (`/tmp/test-gpu-1.lock`, the same one the party-games test helper and `flock` take), samples the card and logs one line to `~/.local/state/gpu/jobs.jsonl`.
-- One heavy job at a time; never add a second lock or raise `TEST_GPU_JOBS` to get around a wait.
+- Run every card job through `gpu-run --label "<what>" --kind <kind> -- <command>`: it waits for a free card slot (`/tmp/test-gpu-<n>.lock`, the same files the party-games test helper and `flock` take), samples the card, its temperature and fan, and logs one line to `~/.local/state/gpu/jobs.jsonl`.
+- The card has 4 slots for test jobs (measured: `GPU-PLAYBOOK.md`, "How many jobs at once"); a heavy job (`--kind blender`, `image` or `model`) takes all of them, so nothing draws beside a render.
+  Never add another lock or raise `TEST_GPU_JOBS` to get around a wait.
+- Add `--max-temp 85` to long or heavy jobs: it refuses (exit 5) while the card is hotter than that.
 - Select the discrete card by name ("RX 7800") in every tool (Blender, Mesa, Vulkan, NCNN); never the integrated Radeon, which shows up as a second device.
 - Blender stays off the card until the owner says otherwise; when he does, follow the staged retry in `GPU-PLAYBOOK.md` (card only, HIP-RT off).
 - Heavy jobs (renders, image models) only when he is away: add `--only-when-idle 15`; exit 4 means he is using the PC, so try later.

@@ -6,21 +6,32 @@ set -euo pipefail
 run="$(cd "$(dirname "$0")" && pwd)/gpu-run"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-export GPU_RUN_STATE="$tmp/state" GPU_RUN_LOCK="$tmp/card.lock"
-unset TEST_NO_GPU TEST_GPU_JOBS
+export GPU_RUN_STATE="$tmp/state" GPU_RUN_LOCK="$tmp/card-{n}.lock"
+unset TEST_NO_GPU TEST_GPU_JOBS TEST_GPU_SLOT_HELD
+slot() { echo "$tmp/card-$1.lock"; }
 log="$GPU_RUN_STATE/jobs.jsonl"
 GiB=1073741824
 
 # A fake sampler: one sample, a pause (so the job starts after it), then busier samples.
 cat >"$tmp/sampler" <<EOF
 #!/bin/sh
-echo '{"t":1,"load":null,"types":{},"used":$((4 * GiB)),"top":[["dwm",$((2 * GiB))]],"cpu":1.0,"adapter":"Test Card","total":$((16 * GiB))}'
+echo '{"t":1,"load":null,"types":{},"used":$((4 * GiB)),"top":[["dwm",$((2 * GiB))]],"cpu":1.0,"adapter":"Test Card","total":$((16 * GiB)),"temp":45.5,"fan":800}'
 sleep 1
 while :; do
-  echo '{"t":2,"load":50.5,"types":{"3d":50.5,"compute 0":12},"used":$((7 * GiB)),"top":[["blender",$((3 * GiB))],["dwm",$((2 * GiB))]],"cpu":1.5}'
+  echo '{"t":2,"load":50.5,"types":{"3d":50.5,"compute 0":12},"used":$((7 * GiB)),"top":[["blender",$((3 * GiB))],["dwm",$((2 * GiB))]],"cpu":1.5,"temp":61,"fan":1450}'
   sleep 0.1
 done
 EOF
+# A card that is too hot, and one whose temperature cannot be read (older driver).
+cat >"$tmp/hot" <<EOF
+#!/bin/sh
+while :; do echo '{"t":1,"load":0,"types":{},"used":$GiB,"top":[],"cpu":1,"adapter":"Test Card","total":$((16 * GiB)),"temp":88.2,"fan":2600}'; sleep 0.1; done
+EOF
+cat >"$tmp/no-temp" <<EOF
+#!/bin/sh
+while :; do echo '{"t":1,"load":0,"types":{},"used":$GiB,"top":[],"cpu":1,"adapter":"Test Card","total":$((16 * GiB))}'; sleep 0.1; done
+EOF
+chmod +x "$tmp"/hot "$tmp"/no-temp
 printf '#!/bin/sh\necho "[]"\n' >"$tmp/no-events"
 printf '#!/bin/sh\necho %s\n' "'{\"time\":\"2026-11-15T20:36:35-08:00\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}'" >"$tmp/one-event"
 printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":2,\"state\":5}'" >"$tmp/idle-2"
@@ -59,6 +70,21 @@ ok "wall time is measured" '[ "$(last ".wall_s >= 1.4")" = true ]'
 ok "load average is logged" '[ "$(last ".loadavg_start | length")" = 3 ]'
 ok "no driver events" '[ "$(last ".driver_events | length")" = 0 ]'
 ok "a three-line summary" '[ "$(wc -l <<<"$out")" = 3 ] && [[ "$out" == *"Test Card load peak 50.5%"* ]]'
+ok "temperature at the start, at the peak and at the end" '[ "$(last "[.gpu.temp_c_start,.gpu.temp_c_peak,.gpu.temp_c_end] | @tsv")" = "$(printf "45.5\t61\t61")" ]'
+ok "peak fan speed" '[ "$(last .gpu.fan_rpm_peak)" = 1450 ]'
+ok "a job record has no temperature trace" '[ "$(last ".gpu | has(\"temp_c_trace\")")" = false ]'
+ok "the summary shows the temperature" '[[ "$out" == *"45.5 C at the start, peak 61 C, fan peak 1450 rpm"* ]]'
+
+# --max-temp.
+lines="$(wc -l <"$log")"
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/hot" "$run" --max-temp 85 --label hot -- touch "$tmp/ran-hot" 2>&1)" || rc=$?
+ok "--max-temp refuses while the card is too hot" '[ "$rc" = 5 ] && [[ "$out" == *"88.2 C (wanted at most 85 C)"* ]] && [ ! -e "$tmp/ran-hot" ] && [ "$(wc -l <"$log")" = "$lines" ]'
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/no-temp" "$run" --max-temp 85 --label unknown -- touch "$tmp/ran-unknown" 2>&1)" || rc=$?
+ok "--max-temp refuses when the temperature cannot be read" '[ "$rc" = 5 ] && [[ "$out" == *"could not be read"* ]] && [ ! -e "$tmp/ran-unknown" ]'
+rc=0; "$run" --max-temp 85 --label cool -- true >/dev/null || rc=$?
+ok "--max-temp runs a job on a cool card" '[ "$rc" = 0 ]'
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/no-temp" "$run" --label unknown -- true)" || rc=$?
+ok "without --max-temp an unreadable temperature is left out" '[ "$rc" = 0 ] && [ "$(last ".gpu | has(\"temp_c_peak\")")" = false ] && [[ "$out" != *" C at the start"* ]]'
 
 # CPU time counts orphaned grandchildren too.
 "$run" --label busy -- sh -c 'python3 -c "import time
@@ -66,17 +92,37 @@ t = time.process_time()
 while time.process_time() - t < 0.6: pass" & exit 0' >/dev/null
 ok "CPU time includes an orphaned grandchild" '[ "$(last ".cpu_s >= 0.5")" = true ] && [ "$(last .cpu_complete)" = true ]'
 
-# The lock: a job waits while another holds it, and holds it while it runs.
-flock "$GPU_RUN_LOCK" sleep 2 &
+# The slots: a job takes one free slot, waits while every slot is in use, and holds its slot
+# while it runs; a heavy job takes every slot.
+default_slots="$(grep -oP '^DEFAULT_SLOTS = \K\d+' "$run")"
+"$run" --label held -- sh -c '! flock -n "$(echo "$GPU_RUN_LOCK" | sed "s/{n}/1/")" true && [ "$TEST_GPU_JOBS" = '"$((default_slots + 1))"' ] && [ "$TEST_GPU_SLOT_HELD" = 1 ]' >/dev/null
+ok "a job holds slot 1 while it runs, and the command gets one more slot than the default" '[ "$(last ".exit,.slots[0]" | tr "\n" " ")" = "0 1 " ]'
+export TEST_GPU_JOBS=2
+flock "$(slot 1)" sleep 1.5 &
 holder=$!
 sleep 0.3
-out="$("$run" --label wait -- true 2>&1)"
+"$run" --label second -- sh -c '! flock -n "'"$(slot 2)"'" true && [ "$TEST_GPU_JOBS" = 3 ]' >/dev/null
 wait "$holder"
-ok "a job waits for the lock and says so" '[[ "$out" == *"waiting for the graphics card"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
-"$run" --label held -- sh -c '! flock -n "$GPU_RUN_LOCK" true && [ "$TEST_GPU_JOBS" = 2 ]' >/dev/null
-ok "the lock is held during the job, and the command gets a second test slot" '[ "$(last .exit)" = 0 ]'
-"$run" --no-lock --label free -- sh -c 'flock -n "$GPU_RUN_LOCK" true && [ -z "${TEST_GPU_JOBS:-}" ]' >/dev/null
-ok "--no-lock leaves the lock and the environment alone" '[ "$(last ".exit,.lock" | tr "\n" " ")" = "0 none " ]'
+ok "with slot 1 in use a job takes slot 2 at once" '[ "$(last ".exit,.slots[0]" | tr "\n" " ")" = "0 2 " ] && [ "$(last ".lock_wait_s < 1")" = true ]'
+flock "$(slot 1)" sleep 2 &
+h1=$!
+flock "$(slot 2)" sleep 2 &
+h2=$!
+sleep 0.3
+out="$("$run" --label wait -- true 2>&1)"
+wait "$h1" "$h2"
+ok "a job waits while every slot is in use, and says so" '[[ "$out" == *"waiting for the graphics card (all 2 slots"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
+"$run" --label render --kind blender -- sh -c '! flock -n "'"$(slot 1)"'" true && ! flock -n "'"$(slot 2)"'" true && [ "$TEST_GPU_JOBS" = 2 ] && [ -z "${TEST_GPU_SLOT_HELD:-}" ]' >/dev/null
+ok "a heavy job holds every slot" '[ "$(last ".exit,(.slots | length)" | tr "\n" " ")" = "0 2 " ]'
+flock "$(slot 2)" sleep 1.5 &
+holder=$!
+sleep 0.3
+out="$("$run" --label render --kind image -- true 2>&1)"
+wait "$holder"
+ok "a heavy job waits for a test job on any slot" '[[ "$out" == *"heavy job takes all 2 slots"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
+unset TEST_GPU_JOBS
+"$run" --no-lock --label free -- sh -c 'flock -n "'"$(slot 1)"'" true && [ -z "${TEST_GPU_JOBS:-}" ] && [ -z "${TEST_GPU_SLOT_HELD:-}" ]' >/dev/null
+ok "--no-lock leaves the slots and the environment alone" '[ "$(last ".exit,.lock" | tr "\n" " ")" = "0 none " ]'
 
 # The off switch.
 "$run" --off "driver error at 20:36" >/dev/null
@@ -87,6 +133,7 @@ ok "a job refuses while the card is off" '[ "$rc" = 3 ] && [[ "$out" == *"driver
 ok "a --cpu run goes ahead with TEST_NO_GPU=1 and no lock" '[ "$(last ".exit,.cpu_run,.lock" | tr "\n" " ")" = "0 true none " ]'
 "$run" --watch 1.5 --label rest >/dev/null
 ok "--watch samples while the card is off" '[ "$(last ".kind,.cmd" | tr "\n" " ")" = "watch null " ] && [ "$(last .gpu.samples)" -ge 1 ]'
+ok "--watch keeps every temperature reading" '[ "$(last ".gpu.temp_c_trace | length")" -ge 2 ] && [ "$(last ".gpu.temp_c_trace[0] | length")" = 2 ]'
 "$run" --on >/dev/null
 rc=0; TEST_NO_GPU=1 "$run" --label envoff -- true >/dev/null 2>&1 || rc=$?
 ok "TEST_NO_GPU=1 also refuses" '[ "$rc" = 3 ]'
@@ -109,7 +156,7 @@ ok "a driver event is logged" '[ "$(last ".driver_events[0].id")" = 1001 ] && [[
 export GPU_RUN_STATE="$tmp/fixture"
 mkdir -p "$GPU_RUN_STATE"
 row() { # row start label kind cpu_run wall cpu exit events
-  printf '{"v":1,"start":"%s","end":"%s","label":"%s","kind":"%s","cpu_run":%s,"wall_s":%s,"cpu_s":%s,"exit":%s,"gpu":{"load_peak":60,"vram_used_peak_gb":8.5},"driver_events":%s}\n' "$1" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+  printf '{"v":1,"start":"%s","end":"%s","label":"%s","kind":"%s","cpu_run":%s,"wall_s":%s,"cpu_s":%s,"exit":%s,"gpu":{"load_peak":60,"vram_used_peak_gb":8.5,"temp_c_start":47,"temp_c_peak":%s,"temp_c_end":50},"driver_events":%s}\n' "$1" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$((60 + $5 % 7))" "$8"
 }
 {
   row 2026-11-10T10:00:00-08:00 old other false 9 1 0 '[]'
@@ -117,11 +164,13 @@ row() { # row start label kind cpu_run wall cpu exit events
   row 2026-11-15T10:05:00-08:00 room-pick browser-test false 42 26 0 '[]'
   row 2026-11-15T10:10:00-08:00 room-pick browser-test true 120 550 0 '[]'
   row 2026-11-15T10:20:00-08:00 cube blender false 5 1 1 '[{"time":"2026-11-15T10:20:03-08:00","provider":"Windows Error Reporting","id":1001,"text":"LiveKernelEvent 141"}]'
+  row 2026-11-15T10:30:00-08:00 rest watch false 30 null 0 '[]'
   echo 'not json'
 } >"$GPU_RUN_STATE/jobs.jsonl"
 rep="$("$run" --report --since 2026-11-15)"
-ok "the report skips jobs before --since" '[[ "$rep" != *"| old |"* ]] && [[ "$rep" == *"4 records"* ]]'
-ok "the report counts runs and failures by kind" '[[ "$rep" == *"| browser-test | 2 | 0 | 41 s | 42 s | 60% | 8.5 GB |"* ]] && [[ "$rep" == *"| blender | 1 | 1 |"* ]]'
+ok "the report skips jobs before --since" '[[ "$rep" != *"| old |"* ]] && [[ "$rep" == *"5 records"* ]]'
+ok "the report counts runs and failures by kind, with the peak temperature" '[[ "$rep" == *"| browser-test | 2 | 0 | 41 s | 42 s | 60% | 8.5 GB | 65 C |"* ]] && [[ "$rep" == *"| blender | 1 | 1 |"* ]]'
+ok "the report shows a baseline's temperature" '[[ "$rep" == *"| rest | 30 |"*"| 47 / 62 / 50 C |"* ]]'
 ok "the report shows the card against the CPU" '[[ "$rep" == *"| room-pick | 2 / 1 | 41 s | 120 s | 2.9x | 25.5 s | 550 s | 21.6x |"* ]]'
 ok "the report lists jobs during a driver event" '[[ "$rep" == *"cube (blender, exit 1): Windows Error Reporting 1001"* ]]'
 

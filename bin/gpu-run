@@ -7,8 +7,11 @@
   gpu-run --events [--since YYYY-MM-DD]           Windows display driver events
   gpu-run --off "<reason>" | --on                 switch GPU jobs off or on everywhere
 
-A job waits for the shared card lock (/tmp/test-gpu-1.lock, the same flock the party-games
-test helper takes) and refuses to start while TEST_NO_GPU=1 is set or the OFF marker exists.
+The card has a few slots for test jobs, one flock file each (/tmp/test-gpu-<n>.lock, n = 1 to
+TEST_GPU_JOBS, default 4, the same files the party-games test helper takes). A job takes one
+free slot and waits while all are in use; a heavy job (--kind blender, image or model) takes
+every slot, so no test browser draws beside a render. A job refuses to start while
+TEST_NO_GPU=1 is set or the OFF marker exists.
 While it runs, one long-lived PowerShell process on the Windows side reads the GPU performance
 counters every two seconds and streams them back. At the end one JSON line goes to
 ~/.local/state/gpu/jobs.jsonl and three summary lines are printed.
@@ -16,14 +19,19 @@ counters every two seconds and streams them back. At the end one JSON line goes 
 --cpu marks a CPU comparison run of the same label: it takes no lock, runs while the card is
 switched off, and sets TEST_NO_GPU=1 for the command so test browsers draw in software.
 
-Environment (mostly for tests): GPU_RUN_STATE (state folder), GPU_RUN_LOCK (lock file),
+Environment (mostly for tests): GPU_RUN_STATE (state folder), GPU_RUN_LOCK (slot lock files,
+with {n} for the slot number),
 GPU_RUN_ADAPTER (adapter name to sample, default "RX 7800"), GPU_RUN_SAMPLER, GPU_RUN_EVENTS
 and GPU_RUN_IDLE (commands that replace the Windows sampler, event query and idle check).
 --only-when-idle MIN refuses unless nobody has touched the PC for MIN minutes and no full-screen
 program has the screen (Windows GetLastInputInfo and SHQueryUserNotificationState).
+--max-temp C refuses while the card is hotter than C degrees. The sampler also reads the card's
+temperature and fan speed (as Task Manager does), so every record has temp_c_start, temp_c_peak,
+temp_c_end and fan_rpm_peak, and a --watch record has every reading (temp_c_trace) to show how
+fast the card cools down.
 
 Exit codes: the command's own, 3 when the card is switched off, 4 when the PC is not idle,
-2 for usage errors.
+5 when the card is too hot (--max-temp), 2 for usage errors.
 """
 
 import argparse
@@ -47,7 +55,12 @@ HOME = os.path.expanduser("~")
 STATE = os.environ.get("GPU_RUN_STATE") or os.path.join(HOME, ".local/state/gpu")
 LOG = os.path.join(STATE, "jobs.jsonl")
 OFF = os.path.join(STATE, "OFF")
-LOCK = os.environ.get("GPU_RUN_LOCK") or "/tmp/test-gpu-1.lock"
+LOCK = os.environ.get("GPU_RUN_LOCK") or "/tmp/test-gpu-{n}.lock"
+# How many test jobs may draw on the card at once unless TEST_GPU_JOBS says otherwise. Measured
+# on the RX 7800 XT on 2026-11-15 (GPU-PLAYBOOK.md, "How many jobs at once"). The party-games
+# test helper (lobby/test/browser.mjs, DEFAULT_CARD_SLOTS) uses the same number: keep them in step.
+DEFAULT_SLOTS = 4
+HEAVY = {"blender", "image", "model"}  # these take every slot
 ADAPTER = os.environ.get("GPU_RUN_ADAPTER") or "RX 7800"
 INTERVAL = 2.0
 KINDS = ["browser-test", "blender", "image", "model", "other"]
@@ -79,12 +92,66 @@ try {
     $l = [int64]$p.AdapterLuid
     $luid = 'luid_0x{0:x8}_0x{1:x8}_' -f ($l -shr 32), ($l -band 0xffffffffL)
     if (@($mem.Keys | Where-Object { $_.StartsWith($luid) }).Count -gt 0) {
-      $pick = @{ name = ($p.Description -replace '\s+', ' ').Trim(); luid = $luid; total = [int64]$p.DedicatedVideoMemory }
+      $pick = @{ name = ($p.Description -replace '\s+', ' ').Trim(); luid = $luid; luidValue = $l; total = [int64]$p.DedicatedVideoMemory }
       break
     }
   }
   if (-not $pick) { Emit @{ error = "no adapter named *$match* in the GPU counters" }; exit 2 }
   $luid = $pick.luid
+  # Temperature and fan speed, read the way Task Manager does: D3DKMTQueryAdapterInfo with
+  # KMTQAITYPE_ADAPTERPERFDATA (62) on the adapter whose LUID is the one picked above. The handle
+  # is opened once; each sample is one call (microseconds). Power is left out: this driver
+  # reports 0. Any failure here only drops the temperature, never the other figures.
+  $thermal = $false
+  try {
+    Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class GpuRunKmt {
+  [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Low; public int High; }
+  [StructLayout(LayoutKind.Sequential)] struct INFO { public uint h; public LUID Luid; public uint Sources; public int Move; }
+  [StructLayout(LayoutKind.Sequential)] struct ENUM2 { public uint Num; public IntPtr p; }
+  [StructLayout(LayoutKind.Sequential)] struct QUERY { public uint h; public int Type; public IntPtr p; public uint Size; }
+  [StructLayout(LayoutKind.Sequential)] struct CLOSE { public uint h; }
+  [StructLayout(LayoutKind.Sequential)] public struct PERF {
+    public uint PhysicalAdapterIndex; public ulong MemoryFrequency; public ulong MaxMemoryFrequency; public ulong MaxMemoryFrequencyOC;
+    public ulong MemoryBandwidth; public ulong PCIEBandwidth; public uint FanRPM; public uint Power; public uint Temperature; public byte PowerStateOverride;
+  }
+  [DllImport("gdi32.dll")] static extern int D3DKMTEnumAdapters2(ref ENUM2 e);
+  [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QUERY q);
+  [DllImport("gdi32.dll")] static extern int D3DKMTCloseAdapter(ref CLOSE c);
+  static uint handle; static IntPtr buf = IntPtr.Zero;
+  // Opens the adapter with this LUID and closes every other handle; false if there is none.
+  public static bool Open(long luid) {
+    var e = new ENUM2(); D3DKMTEnumAdapters2(ref e);
+    if (e.Num == 0) return false;
+    int sz = Marshal.SizeOf(typeof(INFO));
+    e.p = Marshal.AllocHGlobal(sz * (int)e.Num);
+    try {
+      if (D3DKMTEnumAdapters2(ref e) != 0) return false;
+      bool found = false;
+      for (int i = 0; i < (int)e.Num; i++) {
+        var a = (INFO)Marshal.PtrToStructure(new IntPtr(e.p.ToInt64() + i * sz), typeof(INFO));
+        long l = ((long)a.Luid.High << 32) | a.Luid.Low;
+        if (!found && l == luid) { handle = a.h; found = true; continue; }
+        var c = new CLOSE(); c.h = a.h; D3DKMTCloseAdapter(ref c);
+      }
+      if (found) buf = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(PERF)));
+      return found;
+    } finally { Marshal.FreeHGlobal(e.p); }
+  }
+  // { temperature in tenths of a degree C, fan rpm }, or null when the query fails.
+  public static uint[] Read() {
+    int n = Marshal.SizeOf(typeof(PERF));
+    for (int b = 0; b < n; b++) Marshal.WriteByte(buf, b, 0);
+    var q = new QUERY(); q.h = handle; q.Type = 62; q.p = buf; q.Size = (uint)n;
+    if (D3DKMTQueryAdapterInfo(ref q) != 0) return null;
+    var p = (PERF)Marshal.PtrToStructure(buf, typeof(PERF));
+    return new uint[] { p.Temperature, p.FanRPM };
+  }
+}
+'@
+    $thermal = [GpuRunKmt]::Open($pick.luidValue)
+  } catch { $thermal = $false }
   $names = @{}; $prev = @{}; $n = 0
   $self = [Diagnostics.Process]::GetCurrentProcess()
   while ((Get-Date) -lt $deadline) {
@@ -96,7 +163,10 @@ try {
       $s = $eng[$k].Sample; $cur[$k] = $s
       if ($prev.ContainsKey($k)) {
         $v = [Diagnostics.CounterSample]::Calculate($prev[$k], $s)
-        $e = $k -replace '^pid_\d+_', ''
+        # Every WSL process shows up under the VM's one Windows process (vmwp), so their
+        # instance names collide and Windows numbers the copies ("...engtype_3D#2"): strip that
+        # too, or two WSL jobs on the same engine read as two half-busy engines.
+        $e = ($k -replace '^pid_\d+_', '') -replace '#\d+$', ''
         $sum[$e] = [double]$sum[$e] + $v
       }
     }
@@ -114,15 +184,14 @@ try {
     $used = [int64]0
     $mem = $memCat.ReadCategory()['Dedicated Usage']
     foreach ($k in $mem.Keys) { if ($k.StartsWith($luid)) { $used += $mem[$k].RawValue } }
-    $procs = @()
+    $byPid = @{}
     $pm = $pmCat.ReadCategory()['Dedicated Usage']
     foreach ($k in $pm.Keys) {
       if (-not $k.Contains($luid)) { continue }
-      $b = $pm[$k].RawValue
-      if ($b -lt 1MB) { continue }
       $id = [int]($k -replace '^pid_(\d+)_.*$', '$1')
-      $procs += [pscustomobject]@{ id = $id; b = [int64]$b }
+      $byPid[$id] = [int64]$byPid[$id] + [int64]$pm[$k].RawValue  # vmwp has one instance per WSL process
     }
+    $procs = @($byPid.Keys | Where-Object { $byPid[$_] -ge 1MB } | ForEach-Object { [pscustomobject]@{ id = $_; b = $byPid[$_] } })
     if ($n % 30 -eq 0) { $names = @{} }
     $top = @()
     foreach ($q in ($procs | Sort-Object b -Descending | Select-Object -First 5)) {
@@ -133,6 +202,10 @@ try {
     }
     $self.Refresh()
     $o = @{ t = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0; load = $load; types = $types; used = $used; top = $top; cpu = [Math]::Round($self.TotalProcessorTime.TotalSeconds, 2) }
+    if ($thermal) {
+      try { $th = [GpuRunKmt]::Read() } catch { $th = $null }
+      if ($th -and $th[0] -gt 0) { $o.temp = [Math]::Round($th[0] / 10.0, 1); $o.fan = [int]$th[1] }
+    }
     if ($n -eq 0) { $o.adapter = $pick.name; $o.total = $pick.total }
     Emit $o
     $n++
@@ -276,8 +349,13 @@ class Sampler:
                 self.proc.kill()
                 self.proc.wait()
 
-    def summary(self, first_index=0):
-        """Card figures from samples[first_index:]; the sample before it gives 'free before'."""
+    def latest_temp(self):
+        return next((s["temp"] for s in reversed(self.samples) if s.get("temp") is not None), None)
+
+    def summary(self, first_index=0, trace=False):
+        """Card figures from samples[first_index:]; the sample before it gives 'free before' and
+        the starting temperature. trace=True adds every temperature reading (for --watch, to see
+        how fast the card cools down)."""
         if not self.samples:
             return {"error": self.error or "no samples"}
         head = self.samples[0]
@@ -306,6 +384,17 @@ class Sampler:
             "top_vram_gb": [[n, round(b / GB, 2)] for n, b in sorted(top.items(), key=lambda kv: -kv[1])[:5]],
             "sampler_cpu_s": round(run[-1].get("cpu", 0) - head.get("cpu", 0), 2),
         }
+        temps = [s["temp"] for s in run if s.get("temp") is not None]
+        fans = [s["fan"] for s in run if s.get("fan") is not None]
+        if temps:
+            out["temp_c_start"] = before.get("temp", temps[0])
+            out["temp_c_peak"] = max(temps)
+            out["temp_c_end"] = temps[-1]
+        if fans:
+            out["fan_rpm_peak"] = max(fans)
+        if trace and temps:
+            t0 = run[0].get("t", 0)
+            out["temp_c_trace"] = [[round(s.get("t", 0) - t0), s["temp"]] for s in run if s.get("temp") is not None]
         if self.error:
             out["error"] = self.error
         return out
@@ -370,15 +459,57 @@ def off_reason():
     return None
 
 
-def take_lock():
-    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
-    t0 = time.monotonic()
+def card_slots():
+    try:
+        return max(1, int(os.environ.get("TEST_GPU_JOBS") or DEFAULT_SLOTS))
+    except ValueError:
+        return DEFAULT_SLOTS
+
+
+def slot_path(n):
+    return LOCK.replace("{n}", str(n)) if "{n}" in LOCK else (LOCK if n == 1 else f"{LOCK}.{n}")
+
+
+def open_slot(n):
+    return os.open(slot_path(n), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+
+
+def try_flock(fd):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
     except BlockingIOError:
-        print(f"gpu-run: waiting for the graphics card ({LOCK} is held by another GPU job)", file=sys.stderr)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd, round(time.monotonic() - t0, 1)
+        return False
+
+
+def take_lock(every):
+    """Takes one free slot, or with every=True all of them (a heavy job: the card to itself).
+    Returns (the slot numbers held, their open files, seconds waited)."""
+    total, t0 = card_slots(), time.monotonic()
+    if every:
+        fds, said = [], False
+        for n in range(1, total + 1):
+            fd = open_slot(n)
+            if not try_flock(fd):
+                if not said:
+                    print(f"gpu-run: waiting for the graphics card: a heavy job takes all {total} slots, and GPU jobs are using some", file=sys.stderr)
+                    said = True
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            fds.append(fd)
+        return list(range(1, total + 1)), fds, round(time.monotonic() - t0, 1)
+    fds = [open_slot(n) for n in range(1, total + 1)]
+    said = False
+    while True:
+        for n, fd in enumerate(fds, 1):
+            if try_flock(fd):
+                for other in fds:
+                    if other != fd:
+                        os.close(other)
+                return [n], [fd], round(time.monotonic() - t0, 1)
+        if not said:
+            print(f"gpu-run: waiting for the graphics card (all {total} slots, {slot_path(1)} and on, are in use)", file=sys.stderr)
+            said = True
+        time.sleep(0.5)
 
 
 # ---------- running the command ----------
@@ -427,9 +558,9 @@ def run_job(args, command):
             print(f"gpu-run: not started: {why}", file=sys.stderr)
             return 3
     os.makedirs(STATE, exist_ok=True)
-    lock_fd, lock_wait = None, 0.0
+    slots, lock_fds, lock_wait = [], [], 0.0
     if not (args.no_lock or cpu_run):
-        lock_fd, lock_wait = take_lock()
+        slots, lock_fds, lock_wait = take_lock(every=args.kind in HEAVY)
     if args.only_when_idle is not None:  # checked after the wait for the lock, right before starting
         why = not_idle_reason(args.only_when_idle)
         if why:
@@ -438,14 +569,24 @@ def run_job(args, command):
     env = dict(os.environ)
     if cpu_run:
         env["TEST_NO_GPU"] = "1"
-    if lock_fd is not None:
+    if len(slots) == 1:
         # The party-games test helper takes /tmp/test-gpu-<n>.lock itself, n = 1..TEST_GPU_JOBS.
-        # gpu-run already holds slot 1 for this job, so give the command one more slot to take,
-        # instead of waiting on its own parent forever. Outside gpu-run nothing changes.
-        env["TEST_GPU_JOBS"] = str(max(1, int(env.get("TEST_GPU_JOBS", "1") or 1)) + 1)
+        # gpu-run already holds a slot for this job, so give the command one more slot to take,
+        # instead of waiting on its own parent forever, and tell it not to queue behind other
+        # waiters for it (TEST_GPU_SLOT_HELD). Outside gpu-run nothing changes.
+        env["TEST_GPU_JOBS"] = str(card_slots() + 1)
+        env["TEST_GPU_SLOT_HELD"] = "1"
     reaper = set_subreaper()
     sampler = Sampler(max_seconds=7 * 24 * 3600)
     sampler.wait_ready()
+    if args.max_temp is not None:
+        temp = sampler.latest_temp()
+        why = ("the card's temperature could not be read" if temp is None
+               else f"the card is at {temp:g} C (wanted at most {args.max_temp:g} C)" if temp > args.max_temp else None)
+        if why:
+            sampler.stop()
+            print(f"gpu-run: not started: {why}", file=sys.stderr)
+            return 5
     first = len(sampler.samples)
     load0 = loadavg()
     ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -472,8 +613,8 @@ def run_job(args, command):
     ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
     sampler.stop()
-    if lock_fd is not None:
-        os.close(lock_fd)
+    for fd in lock_fds:
+        os.close(fd)
     rec = {
         "v": 1,
         "start": now_iso(start),
@@ -481,7 +622,8 @@ def run_job(args, command):
         "label": args.label,
         "kind": args.kind,
         "cpu_run": cpu_run,
-        "lock": "held" if lock_fd is not None else "none",
+        "lock": "held" if slots else "none",
+        "slots": slots,
         "lock_wait_s": lock_wait,
         "cmd": short(shlex.join(command)),
         "cwd": short(os.getcwd()),
@@ -520,7 +662,7 @@ def run_watch(args):
         "kind": "watch", "cpu_run": False, "lock": "none", "lock_wait_s": 0.0, "cmd": None,
         "cwd": short(os.getcwd()), "exit": 0, "wall_s": round(end - start, 2), "cpu_s": None,
         "avg_cores": None, "loadavg_start": load0, "loadavg_end": loadavg(),
-        "gpu": sampler.summary(first), "driver_events": driver_events(start, end),
+        "gpu": sampler.summary(first, trace=True), "driver_events": driver_events(start, end),
     }
     write_record(rec)
     return 0
@@ -542,8 +684,13 @@ def write_record(rec):
         else:
             busiest = next((k for k in g.get("engines_peak") or {} if "video" not in k), None)
             load = f"load peak {g['load_peak']}% avg {g['load_avg']}%" + (f" (busiest engine: {busiest})" if busiest else "")
+        heat = ""
+        if g.get("temp_c_peak") is not None:
+            heat = f", {g['temp_c_start']:g} C at the start, peak {g['temp_c_peak']:g} C"
+            if g.get("fan_rpm_peak") is not None:
+                heat += f", fan peak {g['fan_rpm_peak']} rpm"
         print(f"card: {g['adapter']} {load}, "
-              f"memory peak {g['vram_used_peak_gb']} of {g['vram_total_gb']} GB ({g['vram_free_before_gb']} GB free before), {g['samples']} samples")
+              f"memory peak {g['vram_used_peak_gb']} of {g['vram_total_gb']} GB ({g['vram_free_before_gb']} GB free before){heat}, {g['samples']} samples")
     ev = rec["driver_events"]
     if ev is None:
         print(f"driver events: not checked; logged to {short(LOG)}")
@@ -596,8 +743,8 @@ def report(since):
         return "\n".join(out)
     out += [f"{len(rows)} records, {rows[0]['start']} to {rows[-1]['end']}.", ""]
     out += ["## By kind", "",
-            "| Kind | Runs | Failed | Median wall | Worst wall | Peak card load | Peak video memory |",
-            "|---|---|---|---|---|---|---|"]
+            "| Kind | Runs | Failed | Median wall | Worst wall | Peak card load | Peak video memory | Peak temperature |",
+            "|---|---|---|---|---|---|---|---|"]
     kinds = {}
     for r in rows:
         kinds.setdefault(r["kind"] + (" (CPU)" if r.get("cpu_run") else ""), []).append(r)
@@ -605,8 +752,9 @@ def report(since):
         walls = [r["wall_s"] for r in rs]
         loads = [r["gpu"].get("load_peak") for r in rs if r["gpu"].get("load_peak") is not None]
         vram = [r["gpu"].get("vram_used_peak_gb") for r in rs if r["gpu"].get("vram_used_peak_gb") is not None]
+        temps = [r["gpu"].get("temp_c_peak") for r in rs if r["gpu"].get("temp_c_peak") is not None]
         out.append(f"| {k} | {len(rs)} | {sum(1 for r in rs if r['exit'])} | {med(statistics.median(walls))} s | {max(walls):g} s | "
-                   f"{fmt(max(loads) if loads else None, '%')} | {fmt(max(vram) if vram else None, ' GB')} |")
+                   f"{fmt(max(loads) if loads else None, '%')} | {fmt(max(vram) if vram else None, ' GB')} | {fmt(max(temps) if temps else None, ' C')} |")
     pairs = []
     labels = {}
     for r in rows:
@@ -639,12 +787,16 @@ def report(since):
         out.append("None." + (f" ({unchecked} records could not check the event log.)" if unchecked else ""))
     watches = [r for r in rows if r["kind"] == "watch"]
     if watches:
-        out += ["", "## Baselines (--watch)", "", "| Start | Label | Seconds | Card load avg / peak | Video memory in use | Top users |", "|---|---|---|---|---|---|"]
+        out += ["", "## Baselines (--watch)", "",
+                "| Start | Label | Seconds | Card load avg / peak | Video memory in use | Temperature start / peak / end | Top users |",
+                "|---|---|---|---|---|---|---|"]
         for r in watches:
             g = r["gpu"]
             top = ", ".join(f"{n} {b} GB" for n, b in g.get("top_vram_gb", [])[:3])
+            heat = (f"{fmt(g['temp_c_start'])} / {fmt(g['temp_c_peak'])} / {fmt(g.get('temp_c_end'))} C"
+                    if g.get("temp_c_peak") is not None else "-")
             out.append(f"| {r['start']} | {r['label']} | {r['wall_s']:g} | {fmt(g.get('load_avg'), '%')} / {fmt(g.get('load_peak'), '%')} | "
-                       f"{fmt(g.get('vram_used_peak_gb'), ' GB')} of {fmt(g.get('vram_total_gb'), ' GB')} | {top} |")
+                       f"{fmt(g.get('vram_used_peak_gb'), ' GB')} of {fmt(g.get('vram_total_gb'), ' GB')} | {heat} | {top} |")
     return "\n".join(out)
 
 
@@ -675,6 +827,8 @@ def main(argv):
     ap.add_argument("--no-lock", action="store_true", help="do not take the shared card lock")
     ap.add_argument("--only-when-idle", type=float, metavar="MINUTES",
                     help="refuse (exit 4) unless the owner has not touched the PC for MINUTES and nothing runs full screen")
+    ap.add_argument("--max-temp", type=float, metavar="C",
+                    help="refuse (exit 5) while the card is hotter than C degrees, or its temperature cannot be read")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--watch", type=float, metavar="SECONDS", help="sample the card without running a command")
     mode.add_argument("--report", action="store_true", help="print a Markdown report of the log")

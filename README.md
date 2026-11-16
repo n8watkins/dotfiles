@@ -10,7 +10,7 @@ How my coding agents (Claude Code and Codex) are set up: the rules every session
 | `skills/` | Playbooks: step-by-step procedures an agent loads only when the situation comes up. | `~/.agents/skills/`, linked into `~/.claude/skills/` and `~/.codex/skills/` |
 | `home/.claude/settings.json` | Claude Code settings: permission prompts, hooks, status line, and 90 days of session logs (`cleanupPeriodDays`; the default is 30) so [VibeLog](https://github.com/n8watkins/vibelog) can read them. The read-only `vibe today`, `vibe week` and `vibe standup` reports run without a prompt. | Copied to `~/.claude/settings.json` |
 | `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env`/`hushkey` `run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). It also asks before `--no-mask`, restic, the Hushkey backup files, unit and script, Windows Hello unlocks and helper runs, R2 bucket deletes and lock changes, and releases (v* tags, `gh release`, publish, release scripts). Tests: `confirm-destructive-git.test.sh`, which also checks the settings.json permission rules. | `~/.claude/hooks/` |
-| `bin/` | `trash` (move instead of delete) and `agent-lock` (the config lock). | `~/.local/bin/` |
+| `bin/` | `trash` (move instead of delete), `agent-lock` (the config lock) and `gpu-run` (measure and log jobs on the graphics card; see below). | `~/.local/bin/` |
 | `home/.config/dcg/` | Destructive command guard settings, exceptions and the `n8` rule pack for my databases and hosts. | `~/.config/dcg/` |
 | `home/.codex/config.hooks.toml` | The dcg hook for Codex. | A marked block inside `~/.codex/config.toml` |
 | `home/.codex/rules/guardrails.rules` | Codex command rules mirroring the Claude permission rules where a fixed command prefix can express them. Tests: `guardrails.test.sh`. | `~/.codex/rules/guardrails.rules` |
@@ -37,6 +37,7 @@ Only the description sits in an agent's context every session; the steps load wh
 | `agent-brief` | Writing the prompt for a build subagent, and running several at once. |
 | `owner-preview` | Building a page the owner picks options from; delivered hosted, for a phone. |
 | `publish-review` | Having a reviewer agent read every line of a page before it is published. |
+| `gpu-jobs` | Running a render, a browser test, a model or any other job on the PC's graphics card. |
 
 ## Rules for this repo
 
@@ -105,6 +106,27 @@ It covers what makes an agent run or trust something: Claude Code and Codex hook
 The snapshot in `~/.local/state/agent-lock/` holds fingerprints and names only, never env values or MCP settings.
 dcg blocks agents from running `agent-lock approve`; an agent that edits the snapshot file directly is not stopped, and a merged rewrite of `agent-lock` that hides its own change would only be caught in PR review, so this is a tripwire, not a lock.
 Tests: `bin/agent-lock.test.sh`.
+
+## GPU jobs
+
+`bin/gpu-run` runs a command as a graphics-card job on a Windows PC with WSL and records what happened, so tuning the card's use rests on numbers instead of guesses.
+
+```bash
+gpu-run --label "room-pick suite" --kind browser-test -- node test/e2e.mjs
+gpu-run --cpu --label "room-pick suite" --kind browser-test -- node test/e2e.mjs   # the same job in software
+gpu-run --watch 30 --label "desktop at rest"
+gpu-run --report --since 2026-11-01
+gpu-run --off "driver error during a render"   # every GPU job refuses until --on
+```
+
+- It waits for the shared card lock (`/tmp/test-gpu-1.lock`, a plain `flock`), and refuses while `TEST_NO_GPU=1` is set or the off marker exists.
+- One long-lived PowerShell process reads the Windows GPU counters every two seconds (overall load, video memory, top processes by video memory) for the adapter named in `GPU_RUN_ADAPTER` (default `RX 7800`), found through its LUID in the DirectX registry keys.
+  A sample costs a few milliseconds after a first read of about five seconds; no window is shown.
+- At the end it checks the Windows logs for display driver timeouts and graphics crashes in the job's time window, appends one JSON line to `~/.local/state/gpu/jobs.jsonl` (no environment, home shortened to `~`) and prints three lines.
+- `--only-when-idle <minutes>` refuses unless nobody has touched the PC for that long and nothing runs full screen.
+
+Tests (no card needed, a fake sampler): `bin/gpu-run.test.sh`.
+The agent rules for using it are in the `gpu-jobs` playbook.
 
 ## Install cooldown
 

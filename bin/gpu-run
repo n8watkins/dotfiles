@@ -57,7 +57,10 @@ GB = 1024**3
 # (PerformanceCounterCategory.ReadCategory: about 2 ms after a first read of about 5 s),
 # because Get-Counter takes seconds per call with several hundred GPU engine instances.
 # The adapter is picked by name from the DirectX registry keys, which hold each adapter's
-# LUID, the id the counter instance names carry. It writes one JSON line per sample and stops
+# LUID, the id the counter instance names carry. Load is the busiest 3D, compute or copy engine
+# (each engine summed over processes, as Task Manager does), leaving out the video encode and
+# decode engines, which are separate units: AMD's recording service can keep one busy all day
+# without slowing a render. Every engine type's peak is still logged. It writes one JSON line per sample and stops
 # when its output pipe closes (gpu-run ended), or after the deadline.
 SAMPLER_PS = r"""
 $ErrorActionPreference = 'Stop'
@@ -102,7 +105,7 @@ try {
       $load = 0.0
       foreach ($e in $sum.Keys) {
         $v = [Math]::Min(100.0, $sum[$e]); $ty = ($e -split 'engtype_')[1]
-        if ($v -gt $load) { $load = $v }
+        if ($ty -notmatch 'video' -and $v -gt $load) { $load = $v }
         if ($v -gt [double]$types[$ty]) { $types[$ty] = [Math]::Round($v, 1) }
       }
       $load = [Math]::Round($load, 1)
@@ -537,7 +540,7 @@ def write_record(rec):
         if g.get("load_peak") is None:
             load = "load not measured (shorter than one sample)"
         else:
-            busiest = next(iter(g.get("engines_peak") or {}), None)
+            busiest = next((k for k in g.get("engines_peak") or {} if "video" not in k), None)
             load = f"load peak {g['load_peak']}% avg {g['load_avg']}%" + (f" (busiest engine: {busiest})" if busiest else "")
         print(f"card: {g['adapter']} {load}, "
               f"memory peak {g['vram_used_peak_gb']} of {g['vram_total_gb']} GB ({g['vram_free_before_gb']} GB free before), {g['samples']} samples")
@@ -581,6 +584,10 @@ def fmt(x, unit=""):
     return "-" if x is None else f"{x:g}{unit}" if isinstance(x, (int, float)) else str(x)
 
 
+def med(x):
+    return f"{round(x, 1):g}"
+
+
 def report(since):
     rows = read_log(since)
     out = [f"# GPU jobs{' since ' + since.date().isoformat() if since else ''}", ""]
@@ -598,7 +605,7 @@ def report(since):
         walls = [r["wall_s"] for r in rs]
         loads = [r["gpu"].get("load_peak") for r in rs if r["gpu"].get("load_peak") is not None]
         vram = [r["gpu"].get("vram_used_peak_gb") for r in rs if r["gpu"].get("vram_used_peak_gb") is not None]
-        out.append(f"| {k} | {len(rs)} | {sum(1 for r in rs if r['exit'])} | {statistics.median(walls):g} s | {max(walls):g} s | "
+        out.append(f"| {k} | {len(rs)} | {sum(1 for r in rs if r['exit'])} | {med(statistics.median(walls))} s | {max(walls):g} s | "
                    f"{fmt(max(loads) if loads else None, '%')} | {fmt(max(vram) if vram else None, ' GB')} |")
     pairs = []
     labels = {}
@@ -612,8 +619,9 @@ def report(since):
             cc = [r["cpu_s"] for r in d["card"] if r["cpu_s"] is not None]
             pc = [r["cpu_s"] for r in d["cpu"] if r["cpu_s"] is not None]
             cc, pc = (statistics.median(cc) if cc else None), (statistics.median(pc) if pc else None)
-            pairs.append(f"| {label} | {len(d['card'])} / {len(d['cpu'])} | {cw:g} s | {pw:g} s | {pw / cw:.1f}x | "
-                         f"{fmt(cc, ' s')} | {fmt(pc, ' s')} | {(pc / cc if cc and pc else 0):.1f}x |")
+            saved = f"{pc / cc:.1f}x" if cc and pc else "-"
+            pairs.append(f"| {label} | {len(d['card'])} / {len(d['cpu'])} | {med(cw)} s | {med(pw)} s | {pw / cw:.1f}x | "
+                         f"{fmt(cc and round(cc, 1), ' s')} | {fmt(pc and round(pc, 1), ' s')} | {saved} |")
     out += ["", "## Card against CPU (same label, passing runs, medians)", ""]
     if pairs:
         out += ["| Label | Runs card / CPU | Wall on card | Wall on CPU | Wall speed-up | CPU time on card | CPU time on CPU | CPU saved |",

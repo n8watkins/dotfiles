@@ -10,6 +10,9 @@ if sed -n '/^exec python3 -I -c /,/^. "\$input"$/p' "$hook" | sed '1d;$d' | grep
 fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# Fixture commits need an identity; CI runners have none configured.
+export GIT_AUTHOR_NAME=guard-test GIT_AUTHOR_EMAIL=guard-test@example.invalid
+export GIT_COMMITTER_NAME=guard-test GIT_COMMITTER_EMAIL=guard-test@example.invalid
 
 # A repo on a feature branch and one on main, for --force-with-lease without a refspec.
 git init -q -b feat/x "$tmp/feat" && git -C "$tmp/feat" commit -q --allow-empty -m init

@@ -1,4 +1,5 @@
-# Runs the guard tests: the git confirmation hook and settings rules, the dcg
+# Runs the guard tests: the git confirmation hook and settings rules, the
+# Cloudflare delete hook, the dcg
 # rule pack, the config lock, the GPU job wrapper and the Codex command rules.
 name: Tests
 
@@ -29,6 +30,8 @@ jobs:
           echo "DCG_BIN=$RUNNER_TEMP/dcg" >> "$GITHUB_ENV"
       - name: Git confirmation hook
         run: bash home/.claude/hooks/confirm-destructive-git.test.sh
+      - name: Cloudflare delete hook
+        run: bash home/.claude/hooks/confirm-cloudflare-delete.test.sh
       - name: dcg rule pack
         run: bash home/.config/dcg/packs/n8.test.sh
       - name: Config lock

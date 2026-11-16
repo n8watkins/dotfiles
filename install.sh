@@ -39,6 +39,7 @@ block home/.config/pnpm/config.yaml "$HOME/.config/pnpm/config.yaml"
 
 # Hooks.
 link home/.claude/hooks/confirm-destructive-git.sh "$HOME/.claude/hooks/confirm-destructive-git.sh"
+link home/.claude/hooks/confirm-cloudflare-delete.sh "$HOME/.claude/hooks/confirm-cloudflare-delete.sh"
 # Codex keeps hooks in config.toml next to settings it rewrites itself, so this
 # repo owns only a marked block in it.
 block home/.codex/config.hooks.toml "$HOME/.codex/config.toml"

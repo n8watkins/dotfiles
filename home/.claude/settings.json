@@ -406,7 +406,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/natkins/.claude/hooks/confirm-cloudflare-delete.sh"
+            "command": "/home/natkins/.claude/hooks/confirm-cloudflare-delete.sh",
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       }

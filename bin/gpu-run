@@ -7,8 +7,11 @@
   gpu-run --events [--since YYYY-MM-DD]           Windows display driver events
   gpu-run --off "<reason>" | --on                 switch GPU jobs off or on everywhere
 
-A job waits for the shared card lock (/tmp/test-gpu-1.lock, the same flock the party-games
-test helper takes) and refuses to start while TEST_NO_GPU=1 is set or the OFF marker exists.
+The card has a few slots for test jobs, one flock file each (/tmp/test-gpu-<n>.lock, n = 1 to
+TEST_GPU_JOBS, default 4, the same files the party-games test helper takes). A job takes one
+free slot and waits while all are in use; a heavy job (--kind blender, image or model) takes
+every slot, so no test browser draws beside a render. A job refuses to start while
+TEST_NO_GPU=1 is set or the OFF marker exists.
 While it runs, one long-lived PowerShell process on the Windows side reads the GPU performance
 counters every two seconds and streams them back. At the end one JSON line goes to
 ~/.local/state/gpu/jobs.jsonl and three summary lines are printed.
@@ -16,7 +19,8 @@ counters every two seconds and streams them back. At the end one JSON line goes 
 --cpu marks a CPU comparison run of the same label: it takes no lock, runs while the card is
 switched off, and sets TEST_NO_GPU=1 for the command so test browsers draw in software.
 
-Environment (mostly for tests): GPU_RUN_STATE (state folder), GPU_RUN_LOCK (lock file),
+Environment (mostly for tests): GPU_RUN_STATE (state folder), GPU_RUN_LOCK (slot lock files,
+with {n} for the slot number),
 GPU_RUN_ADAPTER (adapter name to sample, default "RX 7800"), GPU_RUN_SAMPLER, GPU_RUN_EVENTS
 and GPU_RUN_IDLE (commands that replace the Windows sampler, event query and idle check).
 --only-when-idle MIN refuses unless nobody has touched the PC for MIN minutes and no full-screen
@@ -51,7 +55,12 @@ HOME = os.path.expanduser("~")
 STATE = os.environ.get("GPU_RUN_STATE") or os.path.join(HOME, ".local/state/gpu")
 LOG = os.path.join(STATE, "jobs.jsonl")
 OFF = os.path.join(STATE, "OFF")
-LOCK = os.environ.get("GPU_RUN_LOCK") or "/tmp/test-gpu-1.lock"
+LOCK = os.environ.get("GPU_RUN_LOCK") or "/tmp/test-gpu-{n}.lock"
+# How many test jobs may draw on the card at once unless TEST_GPU_JOBS says otherwise. Measured
+# on the RX 7800 XT on 2026-11-15 (GPU-PLAYBOOK.md, "How many jobs at once"). The party-games
+# test helper (lobby/test/browser.mjs, DEFAULT_CARD_SLOTS) uses the same number: keep them in step.
+DEFAULT_SLOTS = 4
+HEAVY = {"blender", "image", "model"}  # these take every slot
 ADAPTER = os.environ.get("GPU_RUN_ADAPTER") or "RX 7800"
 INTERVAL = 2.0
 KINDS = ["browser-test", "blender", "image", "model", "other"]
@@ -450,15 +459,57 @@ def off_reason():
     return None
 
 
-def take_lock():
-    fd = os.open(LOCK, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
-    t0 = time.monotonic()
+def card_slots():
+    try:
+        return max(1, int(os.environ.get("TEST_GPU_JOBS") or DEFAULT_SLOTS))
+    except ValueError:
+        return DEFAULT_SLOTS
+
+
+def slot_path(n):
+    return LOCK.replace("{n}", str(n)) if "{n}" in LOCK else (LOCK if n == 1 else f"{LOCK}.{n}")
+
+
+def open_slot(n):
+    return os.open(slot_path(n), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+
+
+def try_flock(fd):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
     except BlockingIOError:
-        print(f"gpu-run: waiting for the graphics card ({LOCK} is held by another GPU job)", file=sys.stderr)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    return fd, round(time.monotonic() - t0, 1)
+        return False
+
+
+def take_lock(every):
+    """Takes one free slot, or with every=True all of them (a heavy job: the card to itself).
+    Returns (the slot numbers held, their open files, seconds waited)."""
+    total, t0 = card_slots(), time.monotonic()
+    if every:
+        fds, said = [], False
+        for n in range(1, total + 1):
+            fd = open_slot(n)
+            if not try_flock(fd):
+                if not said:
+                    print(f"gpu-run: waiting for the graphics card: a heavy job takes all {total} slots, and GPU jobs are using some", file=sys.stderr)
+                    said = True
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            fds.append(fd)
+        return list(range(1, total + 1)), fds, round(time.monotonic() - t0, 1)
+    fds = [open_slot(n) for n in range(1, total + 1)]
+    said = False
+    while True:
+        for n, fd in enumerate(fds, 1):
+            if try_flock(fd):
+                for other in fds:
+                    if other != fd:
+                        os.close(other)
+                return [n], [fd], round(time.monotonic() - t0, 1)
+        if not said:
+            print(f"gpu-run: waiting for the graphics card (all {total} slots, {slot_path(1)} and on, are in use)", file=sys.stderr)
+            said = True
+        time.sleep(0.5)
 
 
 # ---------- running the command ----------
@@ -507,9 +558,9 @@ def run_job(args, command):
             print(f"gpu-run: not started: {why}", file=sys.stderr)
             return 3
     os.makedirs(STATE, exist_ok=True)
-    lock_fd, lock_wait = None, 0.0
+    slots, lock_fds, lock_wait = [], [], 0.0
     if not (args.no_lock or cpu_run):
-        lock_fd, lock_wait = take_lock()
+        slots, lock_fds, lock_wait = take_lock(every=args.kind in HEAVY)
     if args.only_when_idle is not None:  # checked after the wait for the lock, right before starting
         why = not_idle_reason(args.only_when_idle)
         if why:
@@ -518,11 +569,13 @@ def run_job(args, command):
     env = dict(os.environ)
     if cpu_run:
         env["TEST_NO_GPU"] = "1"
-    if lock_fd is not None:
+    if len(slots) == 1:
         # The party-games test helper takes /tmp/test-gpu-<n>.lock itself, n = 1..TEST_GPU_JOBS.
-        # gpu-run already holds slot 1 for this job, so give the command one more slot to take,
-        # instead of waiting on its own parent forever. Outside gpu-run nothing changes.
-        env["TEST_GPU_JOBS"] = str(max(1, int(env.get("TEST_GPU_JOBS", "1") or 1)) + 1)
+        # gpu-run already holds a slot for this job, so give the command one more slot to take,
+        # instead of waiting on its own parent forever, and tell it not to queue behind other
+        # waiters for it (TEST_GPU_SLOT_HELD). Outside gpu-run nothing changes.
+        env["TEST_GPU_JOBS"] = str(card_slots() + 1)
+        env["TEST_GPU_SLOT_HELD"] = "1"
     reaper = set_subreaper()
     sampler = Sampler(max_seconds=7 * 24 * 3600)
     sampler.wait_ready()
@@ -560,8 +613,8 @@ def run_job(args, command):
     ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
     sampler.stop()
-    if lock_fd is not None:
-        os.close(lock_fd)
+    for fd in lock_fds:
+        os.close(fd)
     rec = {
         "v": 1,
         "start": now_iso(start),
@@ -569,7 +622,8 @@ def run_job(args, command):
         "label": args.label,
         "kind": args.kind,
         "cpu_run": cpu_run,
-        "lock": "held" if lock_fd is not None else "none",
+        "lock": "held" if slots else "none",
+        "slots": slots,
         "lock_wait_s": lock_wait,
         "cmd": short(shlex.join(command)),
         "cwd": short(os.getcwd()),

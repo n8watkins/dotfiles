@@ -6,8 +6,9 @@ set -euo pipefail
 run="$(cd "$(dirname "$0")" && pwd)/gpu-run"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-export GPU_RUN_STATE="$tmp/state" GPU_RUN_LOCK="$tmp/card.lock"
-unset TEST_NO_GPU TEST_GPU_JOBS
+export GPU_RUN_STATE="$tmp/state" GPU_RUN_LOCK="$tmp/card-{n}.lock"
+unset TEST_NO_GPU TEST_GPU_JOBS TEST_GPU_SLOT_HELD
+slot() { echo "$tmp/card-$1.lock"; }
 log="$GPU_RUN_STATE/jobs.jsonl"
 GiB=1073741824
 
@@ -91,17 +92,37 @@ t = time.process_time()
 while time.process_time() - t < 0.6: pass" & exit 0' >/dev/null
 ok "CPU time includes an orphaned grandchild" '[ "$(last ".cpu_s >= 0.5")" = true ] && [ "$(last .cpu_complete)" = true ]'
 
-# The lock: a job waits while another holds it, and holds it while it runs.
-flock "$GPU_RUN_LOCK" sleep 2 &
+# The slots: a job takes one free slot, waits while every slot is in use, and holds its slot
+# while it runs; a heavy job takes every slot.
+default_slots="$(grep -oP '^DEFAULT_SLOTS = \K\d+' "$run")"
+"$run" --label held -- sh -c '! flock -n "$(echo "$GPU_RUN_LOCK" | sed "s/{n}/1/")" true && [ "$TEST_GPU_JOBS" = '"$((default_slots + 1))"' ] && [ "$TEST_GPU_SLOT_HELD" = 1 ]' >/dev/null
+ok "a job holds slot 1 while it runs, and the command gets one more slot than the default" '[ "$(last ".exit,.slots[0]" | tr "\n" " ")" = "0 1 " ]'
+export TEST_GPU_JOBS=2
+flock "$(slot 1)" sleep 1.5 &
 holder=$!
 sleep 0.3
-out="$("$run" --label wait -- true 2>&1)"
+"$run" --label second -- sh -c '! flock -n "'"$(slot 2)"'" true && [ "$TEST_GPU_JOBS" = 3 ]' >/dev/null
 wait "$holder"
-ok "a job waits for the lock and says so" '[[ "$out" == *"waiting for the graphics card"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
-"$run" --label held -- sh -c '! flock -n "$GPU_RUN_LOCK" true && [ "$TEST_GPU_JOBS" = 2 ]' >/dev/null
-ok "the lock is held during the job, and the command gets a second test slot" '[ "$(last .exit)" = 0 ]'
-"$run" --no-lock --label free -- sh -c 'flock -n "$GPU_RUN_LOCK" true && [ -z "${TEST_GPU_JOBS:-}" ]' >/dev/null
-ok "--no-lock leaves the lock and the environment alone" '[ "$(last ".exit,.lock" | tr "\n" " ")" = "0 none " ]'
+ok "with slot 1 in use a job takes slot 2 at once" '[ "$(last ".exit,.slots[0]" | tr "\n" " ")" = "0 2 " ] && [ "$(last ".lock_wait_s < 1")" = true ]'
+flock "$(slot 1)" sleep 2 &
+h1=$!
+flock "$(slot 2)" sleep 2 &
+h2=$!
+sleep 0.3
+out="$("$run" --label wait -- true 2>&1)"
+wait "$h1" "$h2"
+ok "a job waits while every slot is in use, and says so" '[[ "$out" == *"waiting for the graphics card (all 2 slots"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
+"$run" --label render --kind blender -- sh -c '! flock -n "'"$(slot 1)"'" true && ! flock -n "'"$(slot 2)"'" true && [ "$TEST_GPU_JOBS" = 2 ] && [ -z "${TEST_GPU_SLOT_HELD:-}" ]' >/dev/null
+ok "a heavy job holds every slot" '[ "$(last ".exit,(.slots | length)" | tr "\n" " ")" = "0 2 " ]'
+flock "$(slot 2)" sleep 1.5 &
+holder=$!
+sleep 0.3
+out="$("$run" --label render --kind image -- true 2>&1)"
+wait "$holder"
+ok "a heavy job waits for a test job on any slot" '[[ "$out" == *"heavy job takes all 2 slots"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
+unset TEST_GPU_JOBS
+"$run" --no-lock --label free -- sh -c 'flock -n "'"$(slot 1)"'" true && [ -z "${TEST_GPU_JOBS:-}" ] && [ -z "${TEST_GPU_SLOT_HELD:-}" ]' >/dev/null
+ok "--no-lock leaves the slots and the environment alone" '[ "$(last ".exit,.lock" | tr "\n" " ")" = "0 none " ]'
 
 # The off switch.
 "$run" --off "driver error at 20:36" >/dev/null

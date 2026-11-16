@@ -874,6 +874,39 @@ rule allow 'grep -rn "wrangler delete" docs/'
 rule allow 'rg "wrangler d1 execute .* --remote" README.md'
 rule allow 'gh pr create --title x --body "Run npx wrangler r2 bucket lock add only with the owner"'
 
+# wrangler deploy asks when the config adds a deleted_classes migration that is
+# not both at HEAD and on the remote default branch (review, 2026-11-16).
+do=$tmp/do
+git init -q --bare -b main "$do-origin.git"
+git init -q -b main "$do"
+printf '%s\n' 'name = "rooms"' '[[migrations]]' 'tag = "v1"' 'new_sqlite_classes = ["Room", "Old"]' \
+  '[[migrations]]' 'tag = "v2"' 'deleted_classes = ["Old"]' >"$do/wrangler.toml"
+git -C "$do" add wrangler.toml && git -C "$do" commit -q -m init
+git -C "$do" remote add origin "$do-origin.git" && git -C "$do" push -q origin main 2>/dev/null
+git -C "$do" remote set-head origin main
+run allow "$do" 'npx wrangler deploy'
+run allow "$do" 'pass-env run -- npx wrangler deploy --env production'
+printf '%s\n' '[[migrations]]' 'tag = "v3"' 'deleted_classes = ["Room"]' >>"$do/wrangler.toml"
+run ask   "$do" 'npx wrangler deploy'
+run ask   "$do" 'wrangler deploy --minify'
+run ask   "$do" 'pass-env run -- npx wrangler deploy --env production'
+run ask   "$do" 'pnpm exec wrangler versions upload'
+run ask   "$tmp/feat" "cd $do && npx wrangler deploy"
+run ask   "$tmp/feat" "npx wrangler deploy --cwd $do"
+run ask   "$tmp/feat" "npx wrangler deploy -c $do/wrangler.toml"
+run allow "$do" 'npx wrangler dev'
+run allow "$do" 'npx wrangler tail'
+git -C "$do" commit -q -am "drop Room"
+run ask   "$do" 'npx wrangler deploy'  # committed on this branch, not on the remote yet
+git -C "$do" push -q origin main 2>/dev/null
+run allow "$do" 'npx wrangler deploy'  # already on the default branch: deployed before
+# No git, or a jsonc config: any deleted_classes asks; none stays silent.
+mkdir -p "$tmp/nogit" "$tmp/nogit2"
+printf '%s\n' '{' '  "name": "rooms",' '  // classes' '  "migrations": [{ "tag": "v2", "deleted_classes": ["Room"] }]' '}' >"$tmp/nogit/wrangler.jsonc"
+printf '%s\n' '{ "name": "api", "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }] }' >"$tmp/nogit2/wrangler.json"
+run ask   "$tmp/nogit" 'npx wrangler deploy'
+run allow "$tmp/nogit2" 'npx wrangler deploy'
+
 # 4. Output masking stays on (H6).
 run ask   "$tmp/feat" 'pass-env run --no-mask -- npm test'
 run ask   "$tmp/feat" 'hushkey run --no-mask -- npx wrangler deploy'

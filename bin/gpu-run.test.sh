@@ -31,9 +31,36 @@ cat >"$tmp/no-temp" <<EOF
 #!/bin/sh
 while :; do echo '{"t":1,"load":0,"types":{},"used":$GiB,"top":[],"cpu":1,"adapter":"Test Card","total":$((16 * GiB))}'; sleep 0.1; done
 EOF
-chmod +x "$tmp"/hot "$tmp"/no-temp
+# A card that heats up once the job starts, one with a single hot reading, and one whose
+# temperature can no longer be read after the start.
+cat >"$tmp/heats-up" <<EOF
+#!/bin/sh
+echo '{"t":1,"load":0,"types":{},"used":$GiB,"top":[],"cpu":1,"adapter":"Test Card","total":$((16 * GiB)),"temp":50}'
+sleep 1
+while :; do echo '{"t":2,"load":90,"types":{},"used":$GiB,"top":[],"cpu":1,"temp":95.5}'; sleep 0.1; done
+EOF
+cat >"$tmp/one-spike" <<EOF
+#!/bin/sh
+echo '{"t":1,"load":0,"types":{},"used":$GiB,"top":[],"cpu":1,"adapter":"Test Card","total":$((16 * GiB)),"temp":50}'
+sleep 1
+echo '{"t":2,"load":90,"types":{},"used":$GiB,"top":[],"cpu":1,"temp":95.5}'
+while :; do echo '{"t":3,"load":90,"types":{},"used":$GiB,"top":[],"cpu":1,"temp":60}'; sleep 0.1; done
+EOF
+cat >"$tmp/loses-temp" <<EOF
+#!/bin/sh
+echo '{"t":1,"load":0,"types":{},"used":$GiB,"top":[],"cpu":1,"adapter":"Test Card","total":$((16 * GiB)),"temp":50}'
+sleep 1
+while :; do echo '{"t":2,"load":90,"types":{},"used":$GiB,"top":[],"cpu":1}'; sleep 0.1; done
+EOF
+chmod +x "$tmp"/hot "$tmp"/no-temp "$tmp"/heats-up "$tmp"/one-spike "$tmp"/loses-temp
 printf '#!/bin/sh\necho "[]"\n' >"$tmp/no-events"
-printf '#!/bin/sh\necho %s\n' "'{\"time\":\"2026-11-15T20:36:35-08:00\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}'" >"$tmp/one-event"
+# The event query gets the window's start and end (Unix seconds) as its last two arguments.
+printf '#!/bin/sh\necho %s\n' "'{\"time\":\"2026-11-01T20:36:35-08:00\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}'" >"$tmp/one-event"
+cat >"$tmp/fresh-event" <<'EOF'
+#!/bin/sh
+echo "{\"time\":\"$(date -d "@$1" +%Y-%m-%dT%H:%M:%S%:z)\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}"
+EOF
+chmod +x "$tmp/fresh-event"
 printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":2,\"state\":5}'" >"$tmp/idle-2"
 printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":60,\"state\":3}'" >"$tmp/fullscreen"
 chmod +x "$tmp"/sampler "$tmp"/no-events "$tmp"/one-event "$tmp"/idle-2 "$tmp"/fullscreen
@@ -85,6 +112,23 @@ rc=0; "$run" --max-temp 85 --label cool -- true >/dev/null || rc=$?
 ok "--max-temp runs a job on a cool card" '[ "$rc" = 0 ]'
 rc=0; out="$(GPU_RUN_SAMPLER="$tmp/no-temp" "$run" --label unknown -- true)" || rc=$?
 ok "without --max-temp an unreadable temperature is left out" '[ "$rc" = 0 ] && [ "$(last ".gpu | has(\"temp_c_peak\")")" = false ] && [[ "$out" != *" C at the start"* ]]'
+for bad in nan -5 0 111; do
+  rc=0; "$run" --max-temp "$bad" --label bad -- touch "$tmp/ran-bad" >/dev/null 2>&1 || rc=$?
+  ok "--max-temp $bad is a usage error" '[ "$rc" = 2 ] && [ ! -e "$tmp/ran-bad" ]'
+done
+
+# --max-temp during the job.
+t0=$SECONDS
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/heats-up" "$run" --max-temp 85 --label heat -- sh -c 'sleep 30 & sleep 30; touch "$1"' sh "$tmp/finished-heat" 2>&1)" || rc=$?
+ok "three hot readings stop the job with exit 5" '[ "$rc" = 5 ] && [ ! -e "$tmp/finished-heat" ] && [ $((SECONDS - t0)) -lt 15 ]'
+ok "the stop says why in one line" '[ "$(grep -c "stopping the job" <<<"$out")" = 1 ] && [[ "$out" == *"above 85 C for 3 readings (peak 95.5 C)"* ]]'
+ok "the stop is logged with the peak, and nothing is left running" '[ "$(last ".stopped_for_heat and .heat_peak_c == 95.5 and .max_temp_c == 85 and .left_running == []")" = true ]'
+rc=0; GPU_RUN_SAMPLER="$tmp/one-spike" "$run" --max-temp 85 --label spike -- sleep 1.5 >/dev/null || rc=$?
+ok "one hot reading does not stop the job" '[ "$rc" = 0 ] && [ "$(last ".stopped_for_heat,.gpu.temp_c_peak" | tr "\n" " ")" = "false 95.5 " ]'
+rc=0; GPU_RUN_SAMPLER="$tmp/heats-up" "$run" --label no-limit -- sleep 1.5 >/dev/null || rc=$?
+ok "without --max-temp a hot card does not stop the job" '[ "$rc" = 0 ] && [ "$(last "has(\"stopped_for_heat\")")" = false ]'
+rc=0; GPU_RUN_SAMPLER="$tmp/loses-temp" "$run" --max-temp 85 --label lost -- sleep 1.5 >/dev/null || rc=$?
+ok "readings missing mid-job do not stop it and are counted" '[ "$rc" = 0 ] && [ "$(last ".stopped_for_heat,(.temp_readings_missing > 0)" | tr "\n" " ")" = "false true " ]'
 
 # CPU time counts orphaned grandchildren too.
 "$run" --label busy -- sh -c 'python3 -c "import time
@@ -148,9 +192,17 @@ ok "--only-when-idle runs once idle long enough" '[ "$rc" = 0 ]'
 rc=0; out="$(GPU_RUN_IDLE="$tmp/fullscreen" "$run" --only-when-idle 1 --label idle -- true 2>&1)" || rc=$?
 ok "--only-when-idle refuses during a full-screen game" '[ "$rc" = 4 ] && [[ "$out" == *"full-screen"* ]]'
 
-# A driver event during a job is logged and loud.
-out="$(GPU_RUN_EVENTS="$tmp/one-event" "$run" --label crashy --kind blender -- true)"
+# A driver event is logged and loud; one inside the job's own window switches the card off.
+out="$(GPU_RUN_EVENTS="$tmp/one-event" "$run" --label crashy --kind blender -- true 2>&1)"
 ok "a driver event is logged" '[ "$(last ".driver_events[0].id")" = 1001 ] && [[ "$out" == *"DRIVER EVENTS: 1"* ]]'
+ok "an event outside the job's window does not switch the card off" '[ ! -e "$GPU_RUN_STATE/OFF" ] && [[ "$out" != *"switched the card off"* ]]'
+out="$(GPU_RUN_EVENTS="$tmp/fresh-event" "$run" --label crashy --kind blender -- sleep 1.2 2>&1)"
+ok "an event inside the job's window switches the card off, in one line" '[ "$(grep -c "switched the card off" <<<"$out")" = 1 ] && grep -q "during the job \"crashy\": Windows Error Reporting 1001 at " "$GPU_RUN_STATE/OFF"'
+rc=0; out="$("$run" --label after-crash -- true 2>&1)" || rc=$?
+ok "the next job refuses and says which event" '[ "$rc" = 3 ] && [[ "$out" == *"Windows Error Reporting 1001"* ]] && [[ "$out" == *"gpu-run --on"* ]]'
+"$run" --on >/dev/null
+rc=0; "$run" --label after-on -- true >/dev/null || rc=$?
+ok "--on clears the marker" '[ "$rc" = 0 ] && [ ! -e "$GPU_RUN_STATE/OFF" ]'
 
 # The report, from a fixture log.
 export GPU_RUN_STATE="$tmp/fixture"

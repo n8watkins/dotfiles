@@ -25,13 +25,21 @@ GPU_RUN_ADAPTER (adapter name to sample, default "RX 7800"), GPU_RUN_SAMPLER, GP
 and GPU_RUN_IDLE (commands that replace the Windows sampler, event query and idle check).
 --only-when-idle MIN refuses unless nobody has touched the PC for MIN minutes and no full-screen
 program has the screen (Windows GetLastInputInfo and SHQueryUserNotificationState).
---max-temp C refuses while the card is hotter than C degrees. The sampler also reads the card's
+--max-temp C (above 0, at most 110) refuses while the card is hotter than C degrees or its
+temperature cannot be read, and stops the job (SIGTERM to the command and everything it started,
+SIGKILL after five seconds) when three readings in a row (about six seconds) are above C; the
+record then has stopped_for_heat and heat_peak_c. A reading missing mid-job does not stop it and is
+counted in temp_readings_missing. The sampler also reads the card's
 temperature and fan speed (as Task Manager does), so every record has temp_c_start, temp_c_peak,
 temp_c_end and fan_rpm_peak, and a --watch record has every reading (temp_c_trace) to show how
 fast the card cools down.
 
+When a display driver event falls inside a job's own time window, gpu-run writes the OFF marker
+(as --off does) naming the event, so the next job refuses until `gpu-run --on`. An existing marker
+is left as it is.
+
 Exit codes: the command's own, 3 when the card is switched off, 4 when the PC is not idle,
-5 when the card is too hot (--max-temp), 2 for usage errors.
+5 when the card is too hot (--max-temp, at the start or during the job), 2 for usage errors.
 """
 
 import argparse
@@ -63,6 +71,9 @@ DEFAULT_SLOTS = 4
 HEAVY = {"blender", "image", "model"}  # these take every slot
 ADAPTER = os.environ.get("GPU_RUN_ADAPTER") or "RX 7800"
 INTERVAL = 2.0
+HOT_READINGS = 3  # readings in a row above --max-temp that stop a job (one spike does not)
+STOP_GRACE = 5.0  # seconds between SIGTERM and SIGKILL when a job is stopped
+MAX_TEMP_LIMIT = 110  # the highest --max-temp that makes sense for a graphics card
 KINDS = ["browser-test", "blender", "image", "model", "other"]
 GB = 1024**3
 
@@ -550,6 +561,102 @@ def reap():
             return
 
 
+def job_tree(exclude):
+    """Live processes below gpu-run (the command, what it started, and orphans handed back to
+    gpu-run as subreaper), leaving out the processes in exclude and everything below them."""
+    parents = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue
+        rest = stat[stat.rfind(")") + 2:].split()
+        if rest[0] != "Z":
+            parents[int(d)] = int(rest[1])
+    out, todo = [], [os.getpid()]
+    while todo:
+        p = todo.pop()
+        for c, pp in parents.items():
+            if pp == p and c not in exclude:
+                out.append(c)
+                todo.append(c)
+    return out
+
+
+def stop_job(exclude):
+    """SIGTERM to the command and everything it started, SIGKILL to what is left after
+    STOP_GRACE seconds. The command keeps gpu-run's process group (so Ctrl-C in the terminal
+    still reaches it), so the processes are found through /proc instead of by group."""
+    def send(sig):
+        for pid in job_tree(exclude):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+    send(signal.SIGTERM)
+    deadline = time.monotonic() + STOP_GRACE
+    while time.monotonic() < deadline:
+        if not job_tree(exclude):
+            return
+        time.sleep(0.1)
+    send(signal.SIGKILL)
+
+
+class HeatWatch:
+    """Reads the samples taken while a job runs; hot() is True once HOT_READINGS readings in a
+    row are above the limit. A sample without a temperature breaks the run and is counted."""
+
+    def __init__(self, sampler, first, limit):
+        self.sampler, self.next, self.limit = sampler, first, limit
+        self.run, self.peak, self.missing = 0, None, 0
+
+    def hot(self):
+        samples = self.sampler.samples
+        while self.next < len(samples):
+            temp = samples[self.next].get("temp")
+            self.next += 1
+            if temp is None:
+                self.missing += 1
+                self.run = 0
+            elif temp > self.limit:
+                self.run += 1
+                self.peak = temp if self.peak is None else max(self.peak, temp)
+                if self.run >= HOT_READINGS:
+                    return True
+            else:
+                self.run = 0
+                self.peak = None
+        return False
+
+
+def events_in_window(rows, start, end):
+    """The events whose time falls inside the job's own window (to the second). An event with
+    a time that cannot be read does not count."""
+    out = []
+    for e in rows or []:
+        try:
+            t = datetime.fromisoformat(str(e.get("time"))).timestamp()
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if int(start) <= t <= int(end) + 1:
+            out.append(e)
+    return out
+
+
+def switch_off_for(event, label):
+    """Writes the OFF marker for a driver event during a job, unless the card is already off.
+    Returns True when it wrote the marker."""
+    if os.path.exists(OFF):
+        return False
+    with open(OFF, "w") as f:
+        f.write(f"{now_iso()} driver event during the job \"{label}\": "
+                f"{event.get('provider')} {event.get('id')} at {event.get('time')}\n")
+    return True
+
+
 def run_job(args, command):
     cpu_run = args.cpu
     if not cpu_run:
@@ -599,16 +706,31 @@ def run_job(args, command):
         return 127
     signal.signal(signal.SIGINT, lambda *_: None)  # Ctrl-C reaches the command; we stay to log
     signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
-    rc = proc.wait()
+    keep = {sampler.proc.pid} if sampler.proc else set()
+    heat = HeatWatch(sampler, first, args.max_temp) if args.max_temp is not None else None
+    stopped = False
+    while True:
+        try:
+            rc = proc.wait(timeout=0.5 if heat else None)
+            break
+        except subprocess.TimeoutExpired:
+            if not stopped and heat.hot():
+                stopped, stop_peak = True, heat.peak
+                print(f"gpu-run: stopping the job: the card stayed above {args.max_temp:g} C for "
+                      f"{HOT_READINGS} readings (peak {heat.peak:g} C)", file=sys.stderr)
+                stop_job(keep)
     wall = time.monotonic() - t0
     end = time.time()
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    keep = {sampler.proc.pid} if sampler.proc else set()
     for _ in range(20):  # helpers often exit a moment after the command
-        reap()
         if not children(keep):
             break
         time.sleep(0.1)
+    # Reap after the last look, not before it: a helper that exited between a reap and the look
+    # was a zombie the look skips, so it was never reaped and its CPU time was missing from the
+    # usage read below (the orphaned-grandchild test failed about one run in ten under load).
+    # Every helper the looks saw finish is a zombie by now, so this one reap collects them all.
+    reap()
     left = children(keep)
     ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
@@ -638,8 +760,22 @@ def run_job(args, command):
         "gpu": sampler.summary(first),
         "driver_events": driver_events(start, end),
     }
+    if heat:
+        if not stopped:
+            heat.hot()  # count the readings that came in after the last check
+        rec["max_temp_c"] = args.max_temp
+        rec["stopped_for_heat"] = stopped
+        if stopped:
+            rec["heat_peak_c"] = stop_peak
+        if heat.missing:
+            rec["temp_readings_missing"] = heat.missing
     write_record(rec)
-    return rec["exit"]
+    fresh = events_in_window(rec["driver_events"], start, end)
+    if fresh and switch_off_for(fresh[0], args.label):
+        e = fresh[0]
+        print(f"gpu-run: switched the card off for GPU jobs: {e.get('provider')} {e.get('id')} at {e.get('time')} "
+              f"happened during this job; `gpu-run --on` switches it back on", file=sys.stderr)
+    return 5 if stopped else rec["exit"]
 
 
 def run_watch(args):
@@ -828,7 +964,8 @@ def main(argv):
     ap.add_argument("--only-when-idle", type=float, metavar="MINUTES",
                     help="refuse (exit 4) unless the owner has not touched the PC for MINUTES and nothing runs full screen")
     ap.add_argument("--max-temp", type=float, metavar="C",
-                    help="refuse (exit 5) while the card is hotter than C degrees, or its temperature cannot be read")
+                    help="refuse (exit 5) while the card is hotter than C degrees, or its temperature cannot be read, "
+                         "and stop the job (exit 5) after three readings in a row above C")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--watch", type=float, metavar="SECONDS", help="sample the card without running a command")
     mode.add_argument("--report", action="store_true", help="print a Markdown report of the log")
@@ -837,6 +974,8 @@ def main(argv):
     mode.add_argument("--on", action="store_true", help="switch GPU jobs back on")
     ap.add_argument("--since", help="with --report or --events: from this date (YYYY-MM-DD)")
     args = ap.parse_args(argv)
+    if args.max_temp is not None and not (0 < args.max_temp <= MAX_TEMP_LIMIT):  # also catches nan
+        ap.error(f"--max-temp wants degrees C above 0 and at most {MAX_TEMP_LIMIT}, not {args.max_temp:g}")
     since = parse_since(args.since) if args.since else None
     if args.report:
         print(report(since))

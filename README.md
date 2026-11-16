@@ -9,7 +9,7 @@ How my coding agents (Claude Code and Codex) are set up: the rules every session
 | `home/AGENTS.md` | The short rules every agent reads at the start of every session. | `~/AGENTS.md`, linked as `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` |
 | `skills/` | Playbooks: step-by-step procedures an agent loads only when the situation comes up. | `~/.agents/skills/`, linked into `~/.claude/skills/` and `~/.codex/skills/` |
 | `home/.claude/settings.json` | Claude Code settings: permission prompts, hooks, status line, and 90 days of session logs (`cleanupPeriodDays`; the default is 30) so [VibeLog](https://github.com/n8watkins/vibelog) can read them. The read-only `vibe today`, `vibe week` and `vibe standup` reports run without a prompt. | Copied to `~/.claude/settings.json` |
-| `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env`/`hushkey` `run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). It also asks before `--no-mask`, restic, the Hushkey backup files, unit and script, Windows Hello unlocks and helper runs, R2 bucket deletes and lock changes, and releases (v* tags, `gh release`, publish, release scripts). Tests: `confirm-destructive-git.test.sh`, which also checks the settings.json permission rules. | `~/.claude/hooks/` |
+| `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env`/`hushkey` `run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). It also asks before `--no-mask`, restic, the Hushkey backup files, unit and script, Windows Hello unlocks and helper runs, R2 bucket deletes and lock changes, and releases (v* tags, `gh release`, publish, release scripts). Tests: `confirm-destructive-git.test.sh`, which also checks the settings.json permission rules. `confirm-cloudflare-delete.sh`: asks before the Cloudflare connector's `execute` tool runs code that deletes or cannot be undone (see below). Tests: `confirm-cloudflare-delete.test.sh`. | `~/.claude/hooks/` |
 | `bin/` | `trash` (move instead of delete), `agent-lock` (the config lock) and `gpu-run` (measure and log jobs on the graphics card; see below). | `~/.local/bin/` |
 | `home/.config/dcg/` | Destructive command guard settings, exceptions and the `n8` rule pack for my databases and hosts. | `~/.config/dcg/` |
 | `home/.codex/config.hooks.toml` | The dcg hook for Codex. | A marked block inside `~/.codex/config.toml` |
@@ -38,6 +38,7 @@ Only the description sits in an agent's context every session; the steps load wh
 | `owner-preview` | Building a page the owner picks options from; delivered hosted, for a phone. |
 | `publish-review` | Having a reviewer agent read every line of a page before it is published. |
 | `gpu-jobs` | Running a render, a browser test, a model or any other job on the PC's graphics card. |
+| `cloudflare-access` | Changing anything in Cloudflare through the connector or `wrangler`, and exporting data before a delete. |
 
 ## Rules for this repo
 
@@ -60,6 +61,21 @@ It blocks rather than asks, also in bypass mode, and tells the agent to stop and
 
 `confirm-destructive-git.sh` keeps doing its job next to dcg: it asks about GitHub deletes, Actions secrets, login permissions, force pushes, and secrets handed to commands outside the known deploy and test tools.
 When both answer, the stricter answer wins.
+
+## Cloudflare connector guard
+
+The Cloudflare MCP connector gives agents write access to the whole account, and Cloudflare has no "may edit, may not delete" permission.
+Its `execute` tool runs a JavaScript function that calls `cloudflare.request({ method, path, body })`, so `confirm-cloudflare-delete.sh` reads that code before it runs (it matches any tool whose name ends in `cloudflare-api__execute`, whatever the plugin prefix).
+
+- It asks before any DELETE request (any case or quoting), naming the paths it can read.
+- It asks when a method is not one of the literals GET, POST, PUT or PATCH: a variable, a concatenation, a ternary, a template with `${...}`.
+- It asks for a short list of other calls that destroy data or cannot be undone, kept in the `DESTRUCTIVE` table at the top of the script: purging a zone's whole cache, DROP, DELETE or TRUNCATE sent to a D1 `query` or `raw` path, R2 lifecycle and lock rules, a Worker upload whose migrations delete a Durable Object class (`deleted_classes`), KV bulk delete, Registrar, and API tokens.
+- It asks when it cannot parse the input.
+- Everything else (GET-only code, ordinary writes, the word "delete" in a comment, body or path) passes silently in about 35 ms.
+
+It reads the code without running it, so code written to hide its method (`eval`, `JSON.parse`, a method set somewhere other than a `method:` key or a `.method =` assignment) gets past it.
+For `wrangler`, the `permissions.ask` rules in `settings.json` ask before every delete, `d1 execute --remote`, `queues purge`, `rollback` and R2 lifecycle change, next to dcg and `confirm-destructive-git.sh`.
+The agent rules are in the `cloudflare-access` playbook.
 
 To override a block (owner only):
 

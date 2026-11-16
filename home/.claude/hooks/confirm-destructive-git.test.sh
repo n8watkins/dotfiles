@@ -839,6 +839,40 @@ done
 rule allow 'npx wrangler deploy'
 rule allow 'pass-env run -- npx wrangler deploy --env production'
 rule allow 'npx wrangler d1 migrations apply pr-post --remote'
+# Review (2026-11-16): the rules start at the launcher, so flags before the
+# subcommand still match, every "<thing> delete" form is one rule, and text
+# that only mentions wrangler (commit messages, grep) no longer asks.
+for w in 'npx wrangler' 'wrangler' 'pnpm exec wrangler' 'pnpm dlx wrangler' 'bunx wrangler' 'bun x wrangler' \
+    'yarn wrangler' 'npx --yes wrangler@latest' 'pass-env run -- npx wrangler' 'hushkey run -- wrangler' \
+    './node_modules/.bin/wrangler' 'node_modules/.bin/wrangler'; do
+  rule ask "$w --config wrangler.prod.jsonc delete"
+  rule ask "$w -c wrangler.prod.jsonc delete"
+  rule ask "$w --env production delete"
+  rule ask "$w delete --name old-worker"
+  rule ask "$w workflows delete wf"
+  rule ask "$w containers delete c"
+  rule ask "$w pipelines delete p"
+  rule ask "$w dispatch-namespace delete ns"
+  rule ask "$w secrets-store store delete s"
+  rule ask "$w d1 time-travel restore DB --timestamp 2026-11-01"
+  rule ask "$w kv:key delete k --binding KV"
+  rule ask "$w kv:namespace delete --binding KV"
+  rule ask "$w vectorize delete-vectors idx --ids 1"
+  rule ask "$w d1 execute DB --remote=true --file=./x.sql"
+  rule ask "$w r2 bucket delete b"
+  rule ask "$w r2 object delete b/k --remote"
+  rule ask "$w r2 bucket lock add b rule data/"
+  rule ask "$w versions secret delete KEY"
+  rule allow "$w kv key get delete-me --binding KV"
+  rule allow "$w versions deploy v1@100%"
+  rule allow "$w deployments list"
+  rule allow "$w d1 execute DB --local --command x"
+done
+rule allow 'git commit -m "docs: explain wrangler rollback"'
+rule allow 'git commit -m "docs: npx wrangler delete removes a Worker"'
+rule allow 'grep -rn "wrangler delete" docs/'
+rule allow 'rg "wrangler d1 execute .* --remote" README.md'
+rule allow 'gh pr create --title x --body "Run npx wrangler r2 bucket lock add only with the owner"'
 
 # 4. Output masking stays on (H6).
 run ask   "$tmp/feat" 'pass-env run --no-mask -- npm test'

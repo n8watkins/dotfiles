@@ -40,6 +40,7 @@
     Put long PR or commit text in a file written with Write and pass it with `--body-file` or `-F`.
   - Never use a different method to get an effect that was blocked, and never run `agent-lock approve` or `dcg allow-once`.
     When unsure which kind a block is, treat it as a real block.
+    In auto mode a classifier block is a real block: report it, do not rephrase the command.
   - Shell habits the guard blocks, and what to do instead:
     - Scripts: write them with Write to a scratchpad file and run `python3 -I <file>`; never pipe a heredoc into an interpreter or shell.
     - Paths: write scratch paths out in full; never build one in a shell variable and redirect into it.

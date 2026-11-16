@@ -119,9 +119,11 @@ gpu-run --report --since 2026-11-01
 gpu-run --off "driver error during a render"   # every GPU job refuses until --on
 ```
 
-- It waits for the shared card lock (`/tmp/test-gpu-1.lock`, a plain `flock`), and refuses while `TEST_NO_GPU=1` is set or the off marker exists.
-- One long-lived PowerShell process reads the Windows GPU counters every two seconds (overall load, video memory, top processes by video memory) for the adapter named in `GPU_RUN_ADAPTER` (default `RX 7800`), found through its LUID in the DirectX registry keys.
+- It takes a free card slot (`/tmp/test-gpu-<n>.lock`, n = 1 to `TEST_GPU_JOBS`, default 4, plain `flock` files) and waits while all are in use; `--kind blender`, `image` or `model` takes every slot.
+  It refuses while `TEST_NO_GPU=1` is set or the off marker exists.
+- One long-lived PowerShell process reads the Windows GPU counters every two seconds (overall load, video memory, top processes by video memory) for the adapter named in `GPU_RUN_ADAPTER` (default `RX 7800`), found through its LUID in the DirectX registry keys, and the same adapter's temperature and fan speed (the adapter performance data Task Manager reads).
   A sample costs a few milliseconds after a first read of about five seconds; no window is shown.
+- `--max-temp <C>` refuses (exit 5) while the card is hotter than that.
 - At the end it checks the Windows logs for display driver timeouts and graphics crashes in the job's time window, appends one JSON line to `~/.local/state/gpu/jobs.jsonl` (no environment, home shortened to `~`) and prints three lines.
 - `--only-when-idle <minutes>` refuses unless nobody has touched the PC for that long and nothing runs full screen.
 

@@ -154,7 +154,10 @@ public static class GpuRunKmt {
       $s = $eng[$k].Sample; $cur[$k] = $s
       if ($prev.ContainsKey($k)) {
         $v = [Diagnostics.CounterSample]::Calculate($prev[$k], $s)
-        $e = $k -replace '^pid_\d+_', ''
+        # Every WSL process shows up under the VM's one Windows process (vmwp), so their
+        # instance names collide and Windows numbers the copies ("...engtype_3D#2"): strip that
+        # too, or two WSL jobs on the same engine read as two half-busy engines.
+        $e = ($k -replace '^pid_\d+_', '') -replace '#\d+$', ''
         $sum[$e] = [double]$sum[$e] + $v
       }
     }
@@ -172,15 +175,14 @@ public static class GpuRunKmt {
     $used = [int64]0
     $mem = $memCat.ReadCategory()['Dedicated Usage']
     foreach ($k in $mem.Keys) { if ($k.StartsWith($luid)) { $used += $mem[$k].RawValue } }
-    $procs = @()
+    $byPid = @{}
     $pm = $pmCat.ReadCategory()['Dedicated Usage']
     foreach ($k in $pm.Keys) {
       if (-not $k.Contains($luid)) { continue }
-      $b = $pm[$k].RawValue
-      if ($b -lt 1MB) { continue }
       $id = [int]($k -replace '^pid_(\d+)_.*$', '$1')
-      $procs += [pscustomobject]@{ id = $id; b = [int64]$b }
+      $byPid[$id] = [int64]$byPid[$id] + [int64]$pm[$k].RawValue  # vmwp has one instance per WSL process
     }
+    $procs = @($byPid.Keys | Where-Object { $byPid[$_] -ge 1MB } | ForEach-Object { [pscustomobject]@{ id = $_; b = $byPid[$_] } })
     if ($n % 30 -eq 0) { $names = @{} }
     $top = @()
     foreach ($q in ($procs | Sort-Object b -Descending | Select-Object -First 5)) {

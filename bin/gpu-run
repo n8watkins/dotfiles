@@ -1,17 +1,28 @@
 #!/usr/bin/env -S python3 -I
 """gpu-run: run a command as a graphics-card job and record what happened.
 
-  gpu-run --label "<what this is>" [--kind KIND] [--cpu] [--no-lock] [--only-when-idle MIN] -- <command...>
+  gpu-run --label "<what this is>" [--kind KIND] [--tokens N] [--cpu] [--no-lock] [--only-when-idle MIN] -- <command...>
   gpu-run --watch <seconds> [--label "<what>"]   sample the card without running anything
   gpu-run --report [--since YYYY-MM-DD]           Markdown summary of the log
   gpu-run --events [--since YYYY-MM-DD]           Windows display driver events
   gpu-run --off "<reason>" | --on                 switch GPU jobs off or on everywhere
 
-The card has a few slots for test jobs, one flock file each (/tmp/test-gpu-<n>.lock, n = 1 to
-TEST_GPU_JOBS, default 4, the same files the party-games test helper takes). A job takes one
-free slot and waits while all are in use; a heavy job (--kind blender, image or model) takes
-every slot, so no test browser draws beside a render. A job refuses to start while
-TEST_NO_GPU=1 is set or the OFF marker exists.
+The card has a pool of tokens, one per headless WebGL browser process that may draw at once, one
+flock file each (/tmp/test-gpu-<n>.lock, n = 1 to TEST_GPU_JOBS, default 3, the same files the
+party-games test helper takes). A job takes one token, or N with --tokens N (a gate that runs
+several browser suites side by side), and waits while too few are free; a heavy job (--kind
+blender, image or model) takes every token, so no test browser draws beside a render. Tokens are
+taken all at once or not at all, under a gate file (/tmp/test-gpu-gate.lock) that lets a job
+waiting for several tokens go before single-token jobs that come after it.
+The command gets the tokens in TEST_GPU_TOKENS, and the test helper and a gpu-run inside it draw
+only on those, claiming one each, instead of taking more from the pool.
+A job refuses to start while TEST_NO_GPU=1 is set or the OFF marker exists.
+
+Admission: with its tokens in hand, a job also waits until the card can take it: the busiest
+engine averaged under 70% over the last 10 s, at least 2 GB of video memory free, the card under
+80 C, and no display driver event in the last 30 minutes (ADMIT_* below). It says why it waits,
+and after --admit-wait seconds (default 30 minutes) it gives up with exit 6 rather than start on a
+card in trouble. A job inside a job (TEST_GPU_TOKENS set) is part of an admitted job and skips it.
 While it runs, one long-lived PowerShell process on the Windows side reads the GPU performance
 counters every two seconds and streams them back. At the end one JSON line goes to
 ~/.local/state/gpu/jobs.jsonl and three summary lines are printed.
@@ -39,7 +50,8 @@ When a display driver event falls inside a job's own time window, gpu-run writes
 is left as it is.
 
 Exit codes: the command's own, 3 when the card is switched off, 4 when the PC is not idle,
-5 when the card is too hot (--max-temp, at the start or during the job), 2 for usage errors.
+5 when the card is too hot (--max-temp, at the start or during the job), 6 when the card did not
+settle for admission within --admit-wait, 2 for usage errors.
 """
 
 import argparse
@@ -47,6 +59,7 @@ import base64
 import ctypes
 import fcntl
 import json
+import math
 import os
 import resource
 import shlex
@@ -64,11 +77,25 @@ STATE = os.environ.get("GPU_RUN_STATE") or os.path.join(HOME, ".local/state/gpu"
 LOG = os.path.join(STATE, "jobs.jsonl")
 OFF = os.path.join(STATE, "OFF")
 LOCK = os.environ.get("GPU_RUN_LOCK") or "/tmp/test-gpu-{n}.lock"
-# How many test jobs may draw on the card at once unless TEST_GPU_JOBS says otherwise. Measured
-# on the RX 7800 XT on 2026-11-15 (GPU-PLAYBOOK.md, "How many jobs at once"). The party-games
-# test helper (lobby/test/browser.mjs, DEFAULT_CARD_SLOTS) uses the same number: keep them in step.
-DEFAULT_SLOTS = 4
-HEAVY = {"blender", "image", "model"}  # these take every slot
+# The card's token pool: one token per headless WebGL browser process that may draw at once,
+# unless TEST_GPU_JOBS says otherwise. Real suites ran fine to about six browsers at once and
+# failed from eight (GPU-PLAYBOOK.md, "How many jobs at once"); the pool starts at 3 and the owner
+# ramps it (3, 4, 5) with TEST_GPU_JOBS. The party-games test helper (lobby/test/browser.mjs,
+# DEFAULT_CARD_SLOTS) uses the same number: keep them in step.
+DEFAULT_SLOTS = 3
+HEAVY = {"blender", "image", "model"}  # these take every token
+# Tokens an ancestor holds for this process tree (paths, separated by ":"). A process that has
+# them takes nothing from the pool: it claims some of them instead (see Pool.inherited).
+TOKENS_ENV = "TEST_GPU_TOKENS"
+# Admission: before a job starts, the card must look able to take it. Load is the busiest 3D,
+# compute or copy engine (as the sampler reports it), averaged over the last ADMIT_WINDOW_S.
+ADMIT_WINDOW_S = 10
+ADMIT_MAX_LOAD = 70.0  # percent
+ADMIT_MIN_FREE_GB = 2.0  # free video memory
+ADMIT_MAX_TEMP = 80.0  # degrees C
+ADMIT_EVENT_MINUTES = 30  # no display driver event in this many minutes before the start
+ADMIT_MAX_WAIT_S = 30 * 60  # then the job fails (exit 6) instead of starting on a card in trouble
+ADMIT_EVENT_RECHECK_S = 60  # how often the event log is asked again while a job waits
 ADAPTER = os.environ.get("GPU_RUN_ADAPTER") or "RX 7800"
 INTERVAL = 2.0
 HOT_READINGS = 3  # readings in a row above --max-temp that stop a job (one spike does not)
@@ -481,8 +508,8 @@ def slot_path(n):
     return LOCK.replace("{n}", str(n)) if "{n}" in LOCK else (LOCK if n == 1 else f"{LOCK}.{n}")
 
 
-def open_slot(n):
-    return os.open(slot_path(n), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
+def open_lock(path):
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o666)
 
 
 def try_flock(fd):
@@ -493,34 +520,74 @@ def try_flock(fd):
         return False
 
 
-def take_lock(every):
-    """Takes one free slot, or with every=True all of them (a heavy job: the card to itself).
-    Returns (the slot numbers held, their open files, seconds waited)."""
-    total, t0 = card_slots(), time.monotonic()
-    if every:
-        fds, said = [], False
-        for n in range(1, total + 1):
-            fd = open_slot(n)
-            if not try_flock(fd):
-                if not said:
-                    print(f"gpu-run: waiting for the graphics card: a heavy job takes all {total} slots, and GPU jobs are using some", file=sys.stderr)
-                    said = True
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            fds.append(fd)
-        return list(range(1, total + 1)), fds, round(time.monotonic() - t0, 1)
-    fds = [open_slot(n) for n in range(1, total + 1)]
-    said = False
-    while True:
-        for n, fd in enumerate(fds, 1):
-            if try_flock(fd):
-                for other in fds:
-                    if other != fd:
-                        os.close(other)
-                return [n], [fd], round(time.monotonic() - t0, 1)
-        if not said:
-            print(f"gpu-run: waiting for the graphics card (all {total} slots, {slot_path(1)} and on, are in use)", file=sys.stderr)
-            said = True
-        time.sleep(0.5)
+class Pool:
+    """A set of tokens, each a flock file, and the gate file a taker holds while it gathers them.
+
+    The machine's pool is /tmp/test-gpu-<n>.lock, n = 1 to TEST_GPU_JOBS (the files the
+    party-games test helper takes too), with /tmp/test-gpu-gate.lock as its gate.
+    A process whose ancestor holds tokens (TEST_GPU_TOKENS) uses only those: its pool is one
+    "<token>.use" file per inherited token, with "<first token>.gate" as the gate, so the processes
+    below one job never draw more than the job holds, and what they hold is passed on the same
+    way (the files nest: "<token>.use.use" and on). Every lock is a kernel flock on a file this
+    process has open, so it goes away with the process, however that ends.
+    """
+
+    def __init__(self):
+        inherited = [p for p in os.environ.get(TOKENS_ENV, "").split(":") if p]
+        self.inherited = bool(inherited)
+        if inherited:
+            self.tokens = [p + ".use" for p in inherited]
+            self.gate = inherited[0] + ".gate"
+        else:
+            self.tokens = [slot_path(n) for n in range(1, card_slots() + 1)]
+            self.gate = slot_path("gate")
+
+    def take(self, want):
+        """Waits for `want` tokens (at most all of them) and holds them: all or nothing, so a job
+        never sits on some tokens while it waits for others, and two takers never deadlock. The
+        gate is held from the first try until the tokens are in hand, so a job that needs several
+        tokens is not starved by single-token jobs that keep slipping in ahead of it; it is let go
+        before the job starts. Returns (the token paths held, their open files, seconds waited)."""
+        want = max(1, min(want, len(self.tokens)))
+        t0, said = time.monotonic(), False
+
+        def waiting(why):
+            nonlocal said
+            if not said:
+                print(f"gpu-run: waiting for the graphics card: {why}", file=sys.stderr)
+                said = True
+
+        gate = open_lock(self.gate)
+        try:
+            if not try_flock(gate):
+                waiting("another job is gathering its tokens first")
+                fcntl.flock(gate, fcntl.LOCK_EX)
+            while True:
+                held = []
+                for path in self.tokens:
+                    fd = open_lock(path)
+                    if try_flock(fd):
+                        held.append((path, fd))
+                        if len(held) == want:
+                            return [p for p, _ in held], [f for _, f in held], round(time.monotonic() - t0, 1)
+                    else:
+                        os.close(fd)
+                for _, fd in held:
+                    os.close(fd)
+                whose = "this job's" if self.inherited else "the card's"
+                waiting(f"this job needs {want} of {whose} {len(self.tokens)} tokens (one per browser drawing at once), "
+                        f"and only {len(held)} {'is' if len(held) == 1 else 'are'} free")
+                time.sleep(0.25)
+        finally:
+            os.close(gate)
+
+
+def token_number(path):
+    """The pool number of a token of the machine's pool, for the log; None for an inherited one."""
+    for n in range(1, card_slots() + 1):
+        if slot_path(n) == path:
+            return n
+    return None
 
 
 # ---------- running the command ----------
@@ -657,6 +724,79 @@ def switch_off_for(event, label):
     return True
 
 
+def admission(sampler, max_wait):
+    """Waits until the card looks able to take a job: the busiest engine averaged under
+    ADMIT_MAX_LOAD over the last ADMIT_WINDOW_S, at least ADMIT_MIN_FREE_GB of video memory free,
+    the card under ADMIT_MAX_TEMP, and no display driver event in the last ADMIT_EVENT_MINUTES.
+    Says why in one line whenever the reasons change (and once a minute while they do not).
+    Returns None once admitted, or the reasons still standing after max_wait seconds.
+
+    A figure that cannot be read does not hold a job back (an older driver gives no temperature,
+    and a broken sampler would otherwise stop every job); it is said once instead. The other
+    safeties still apply: --max-temp, the OFF switch, and the switch-off after a driver event.
+    """
+    need = max(1, math.ceil(ADMIT_WINDOW_S / INTERVAL))  # load readings that span the window
+    t0 = time.monotonic()
+    fill_limit = t0 + ADMIT_WINDOW_S * 3 + 30
+    events_at, event, said, said_at, notes = None, None, None, 0.0, set()
+
+    def note(text):
+        if text not in notes:
+            notes.add(text)
+            print(f"gpu-run: admission: {text}", file=sys.stderr)
+
+    while True:
+        loads = [s["load"] for s in sampler.samples if s.get("load") is not None][-need:]
+        if len(loads) < need:
+            done = sampler.proc is None or sampler.proc.poll() is not None
+            if done or time.monotonic() > fill_limit:
+                note(f"not checked ({sampler.error or 'the sampler gave too few readings'}); the job starts")
+                return None
+            time.sleep(0.2)
+            continue
+        reasons = {}
+        avg = statistics.fmean(loads)
+        if avg >= ADMIT_MAX_LOAD:
+            reasons["load"] = f"the card's load averaged {avg:.0f}% over the last {ADMIT_WINDOW_S} s (wanted under {ADMIT_MAX_LOAD:g}%)"
+        total, used = sampler.samples[0].get("total"), sampler.samples[-1].get("used")
+        if total and used is not None:
+            free = (total - used) / GB
+            if free < ADMIT_MIN_FREE_GB:
+                reasons["memory"] = f"{free:.1f} GB of video memory free (wanted at least {ADMIT_MIN_FREE_GB:g} GB)"
+        else:
+            note("free video memory not known")
+        temp = sampler.latest_temp()
+        if temp is None:
+            note("the card's temperature not known")
+        elif temp >= ADMIT_MAX_TEMP:
+            reasons["heat"] = f"the card is at {temp:g} C (wanted under {ADMIT_MAX_TEMP:g} C)"
+        if events_at is None or time.monotonic() - events_at >= ADMIT_EVENT_RECHECK_S:
+            now = time.time()
+            rows = driver_events(now - ADMIT_EVENT_MINUTES * 60, now)
+            events_at = time.monotonic()
+            if rows is None:
+                event = None
+                note("the display driver events could not be checked")
+            else:
+                recent = events_in_window(rows, now - ADMIT_EVENT_MINUTES * 60, now)
+                event = recent[-1] if recent else None
+        if event:
+            reasons["event"] = (f"a display driver event ({event.get('provider')} {event.get('id')} at {event.get('time')}) "
+                                f"in the last {ADMIT_EVENT_MINUTES} minutes")
+        waited = time.monotonic() - t0
+        if not reasons:
+            if said:
+                print(f"gpu-run: the card has settled after {waited:.0f} s; starting", file=sys.stderr)
+            return None
+        text = "; ".join(reasons.values())
+        if waited >= max_wait:
+            return text
+        if said != tuple(reasons) or time.monotonic() - said_at >= 60:
+            print(f"gpu-run: waiting for the card to settle: {text} (gives up after {max_wait:g} s)", file=sys.stderr)
+            said, said_at = tuple(reasons), time.monotonic()
+        time.sleep(min(INTERVAL, max(0.1, max_wait - waited)))
+
+
 def run_job(args, command):
     cpu_run = args.cpu
     if not cpu_run:
@@ -665,9 +805,13 @@ def run_job(args, command):
             print(f"gpu-run: not started: {why}", file=sys.stderr)
             return 3
     os.makedirs(STATE, exist_ok=True)
-    slots, lock_fds, lock_wait = [], [], 0.0
+    tokens, lock_fds, lock_wait, pool = [], [], 0.0, None
     if not (args.no_lock or cpu_run):
-        slots, lock_fds, lock_wait = take_lock(every=args.kind in HEAVY)
+        pool = Pool()
+        want = len(pool.tokens) if args.kind in HEAVY else args.tokens
+        if args.tokens > len(pool.tokens) and args.kind not in HEAVY:
+            print(f"gpu-run: --tokens {args.tokens} is more than the {len(pool.tokens)} there are; taking all of them", file=sys.stderr)
+        tokens, lock_fds, lock_wait = pool.take(want)
     if args.only_when_idle is not None:  # checked after the wait for the lock, right before starting
         why = not_idle_reason(args.only_when_idle)
         if why:
@@ -676,13 +820,19 @@ def run_job(args, command):
     env = dict(os.environ)
     if cpu_run:
         env["TEST_NO_GPU"] = "1"
-    if len(slots) == 1:
-        # The party-games test helper takes /tmp/test-gpu-<n>.lock itself, n = 1..TEST_GPU_JOBS.
-        # gpu-run already holds a slot for this job, so give the command one more slot to take,
-        # instead of waiting on its own parent forever, and tell it not to queue behind other
-        # waiters for it (TEST_GPU_SLOT_HELD). Outside gpu-run nothing changes.
-        env["TEST_GPU_JOBS"] = str(card_slots() + 1)
-        env["TEST_GPU_SLOT_HELD"] = "1"
+    if tokens:
+        # The command and everything it starts draw only on the tokens this job holds: the
+        # party-games test helper (lobby/test/browser.mjs) and a gpu-run inside this one claim one
+        # of these instead of taking from the pool.
+        env[TOKENS_ENV] = ":".join(tokens)
+        if not pool.inherited:
+            # For a test helper from before the token pool, which does not read TEST_GPU_TOKENS
+            # and takes /tmp/test-gpu-<n>.lock itself, n = 1..TEST_GPU_JOBS: one more file than
+            # the pool, so it never waits on its own parent's tokens, and no queueing for it
+            # (TEST_GPU_SLOT_HELD). The helper with the token pool ignores both when
+            # TEST_GPU_TOKENS is set. Drop these once no checkout has the old helper.
+            env["TEST_GPU_JOBS"] = str(card_slots() + 1)
+            env["TEST_GPU_SLOT_HELD"] = "1"
     reaper = set_subreaper()
     sampler = Sampler(max_seconds=7 * 24 * 3600)
     sampler.wait_ready()
@@ -694,6 +844,21 @@ def run_job(args, command):
             sampler.stop()
             print(f"gpu-run: not started: {why}", file=sys.stderr)
             return 5
+    admit_wait = 0.0
+    if not cpu_run and not (pool and pool.inherited):  # a job inside an admitted job is part of it
+        t_admit = time.monotonic()
+        why = admission(sampler, args.admit_wait)
+        admit_wait = round(time.monotonic() - t_admit, 1)
+        if why:
+            sampler.stop()
+            print(f"gpu-run: not started: the card did not settle within {args.admit_wait:g} s: {why}", file=sys.stderr)
+            return 6
+        if args.only_when_idle is not None and admit_wait >= 1:  # the owner may be back by now
+            why = not_idle_reason(args.only_when_idle)
+            if why:
+                sampler.stop()
+                print(f"gpu-run: not started: {why}", file=sys.stderr)
+                return 4
     first = len(sampler.samples)
     load0 = loadavg()
     ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -744,9 +909,11 @@ def run_job(args, command):
         "label": args.label,
         "kind": args.kind,
         "cpu_run": cpu_run,
-        "lock": "held" if slots else "none",
-        "slots": slots,
+        "lock": ("inherited" if pool.inherited else "held") if tokens else "none",
+        "tokens": len(tokens),
+        "slots": [n for n in map(token_number, tokens) if n is not None],
         "lock_wait_s": lock_wait,
+        "admit_wait_s": admit_wait,
         "cmd": short(shlex.join(command)),
         "cwd": short(os.getcwd()),
         "exit": rc if rc >= 0 else 128 - rc,
@@ -961,6 +1128,12 @@ def main(argv):
     ap.add_argument("--kind", choices=KINDS, default="other")
     ap.add_argument("--cpu", action="store_true", help="a CPU comparison run: no lock, TEST_NO_GPU=1 for the command")
     ap.add_argument("--no-lock", action="store_true", help="do not take the shared card lock")
+    ap.add_argument("--tokens", type=int, default=1, metavar="N",
+                    help="card tokens this job holds: how many browsers it may have drawing at once (default 1; "
+                         "--kind blender, image and model take them all)")
+    ap.add_argument("--admit-wait", type=float, default=ADMIT_MAX_WAIT_S, metavar="SECONDS",
+                    help=f"how long to wait for a busy, full, hot or recently crashed card to settle before failing "
+                         f"(exit 6; default {ADMIT_MAX_WAIT_S}, 0 checks once)")
     ap.add_argument("--only-when-idle", type=float, metavar="MINUTES",
                     help="refuse (exit 4) unless the owner has not touched the PC for MINUTES and nothing runs full screen")
     ap.add_argument("--max-temp", type=float, metavar="C",
@@ -976,6 +1149,10 @@ def main(argv):
     args = ap.parse_args(argv)
     if args.max_temp is not None and not (0 < args.max_temp <= MAX_TEMP_LIMIT):  # also catches nan
         ap.error(f"--max-temp wants degrees C above 0 and at most {MAX_TEMP_LIMIT}, not {args.max_temp:g}")
+    if args.tokens < 1:
+        ap.error(f"--tokens wants 1 or more, not {args.tokens}")
+    if not (0 <= args.admit_wait < math.inf):  # also catches nan
+        ap.error(f"--admit-wait wants seconds, 0 or more, not {args.admit_wait:g}")
     since = parse_since(args.since) if args.since else None
     if args.report:
         print(report(since))

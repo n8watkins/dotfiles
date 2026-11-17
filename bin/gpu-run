@@ -559,9 +559,15 @@ class Pool:
 
         gate = open_lock(self.gate)
         try:
-            if not try_flock(gate):
-                waiting("another job is gathering its tokens first")
-                fcntl.flock(gate, fcntl.LOCK_EX)
+            # Another taker holds the gate only for the moment it takes its tokens, unless it is
+            # waiting for tokens itself: only a gate still busy after a short while is said.
+            until = time.monotonic() + 2
+            while not try_flock(gate):
+                if time.monotonic() > until:
+                    waiting("another job is first in line for tokens")
+                    fcntl.flock(gate, fcntl.LOCK_EX)
+                    break
+                time.sleep(0.05)
             while True:
                 held = []
                 for path in self.tokens:

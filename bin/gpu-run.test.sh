@@ -83,10 +83,21 @@ chmod +x "$tmp"/hot "$tmp"/no-temp "$tmp"/heats-up "$tmp"/one-spike "$tmp"/loses
 printf '#!/bin/sh\necho "[]"\n' >"$tmp/no-events"
 # The event query gets the window's start and end (Unix seconds) as its last two arguments.
 printf '#!/bin/sh\necho %s\n' "'{\"time\":\"2026-11-01T20:36:35-08:00\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}'" >"$tmp/one-event"
-# An event at the start of whatever window is asked about: inside the admission look-back.
-cat >"$tmp/fresh-event" <<'EOF'
+# Driver reports some minutes before now, for admission's look-back only (a job's own window gets
+# none): one line per report in $EVENTS_AGO, "<minutes ago> plain|processed". A processed report
+# carries a fault bucket, as Windows files it later for the same timeout.
+cat >"$tmp/events-ago" <<'EOF'
 #!/bin/sh
-echo "{\"time\":\"$(date -d "@$1" +%Y-%m-%dT%H:%M:%S%:z)\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}"
+[ $(($2 - $1)) -ge 600 ] || { echo "[]"; exit 0; }
+sep=""; printf '['
+while read -r ago kind; do
+  [ -n "$ago" ] || continue
+  bucket=""; [ "$kind" = processed ] && bucket="LKD_0x141_Tdr:C_IMAGE_amdkmdag.sys"
+  printf '%s{"time":"%s","log":"Application","provider":"Windows Error Reporting","id":1001,"text":"Fault bucket %s, type 0 Event Name: LiveKernelEvent P1: 141"}' \
+    "$sep" "$(date -d "@$(($2 - ago * 60))" +%Y-%m-%dT%H:%M:%S%:z)" "$bucket"
+  sep=","
+done <"$EVENTS_AGO"
+echo ']'
 EOF
 # An event during the job itself: only a window shorter than the admission look-back gets it.
 cat >"$tmp/job-event" <<'EOF'
@@ -94,14 +105,20 @@ cat >"$tmp/job-event" <<'EOF'
 [ $(($2 - $1)) -lt 600 ] || { echo "[]"; exit 0; }
 echo "{\"time\":\"$(date -d "@$1" +%Y-%m-%dT%H:%M:%S%:z)\",\"log\":\"Application\",\"provider\":\"Windows Error Reporting\",\"id\":1001,\"text\":\"LiveKernelEvent 141\"}"
 EOF
-chmod +x "$tmp/fresh-event" "$tmp/job-event"
+chmod +x "$tmp/events-ago" "$tmp/job-event"
 printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":2,\"state\":5}'" >"$tmp/idle-2"
 printf '#!/bin/sh\necho %s\n' "'{\"idle_min\":60,\"state\":3}'" >"$tmp/fullscreen"
 chmod +x "$tmp"/sampler "$tmp"/no-events "$tmp"/one-event "$tmp"/idle-2 "$tmp"/fullscreen
 export GPU_RUN_SAMPLER="$tmp/sampler" GPU_RUN_EVENTS="$tmp/no-events"
 
 fail=0 n=0
-ok() { n=$((n + 1)); if ! eval "$2"; then fail=$((fail + 1)); echo "FAIL: $1"; fi; }
+ok() { # VERBOSE=1 also prints the last output of a failing check
+  n=$((n + 1))
+  if ! eval "$2"; then
+    fail=$((fail + 1)); echo "FAIL: $1"
+    [ -z "${VERBOSE:-}" ] || printf '%s\n' "${out:-}" | tail -n 6 | sed 's/^/  | /'
+  fi
+}
 last() { tail -n 1 "$log" | jq -r "$1"; }
 
 # Arguments.
@@ -197,7 +214,7 @@ h2=$!
 sleep 0.3
 out="$("$run" --label wait -- true 2>&1)"
 wait "$h1" "$h2"
-ok "a job waits while every token is in use, and says so" '[[ "$out" == *"needs 1 of the card'"'"'s 2 tokens (one per browser drawing at once), and only 0 are free"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
+ok "a job waits while every token is in use, and says so" '[[ "$out" == *"needs 1 of the card'"'"'s 2 tokens (one per browser drawing at once), and too few are free"* ]] && [ "$(last ".lock_wait_s >= 1")" = true ]'
 "$run" --label render --kind blender -- sh -c '! flock -n "'"$(slot 1)"'" true && ! flock -n "'"$(slot 2)"'" true && [ "$TEST_GPU_TOKENS" = "'"$(slot 1):$(slot 2)"'" ]' >/dev/null
 ok "a heavy job holds every token" '[ "$(last ".exit,(.slots | length)" | tr "\n" " ")" = "0 2 " ]'
 flock "$(slot 2)" sleep 1.5 &
@@ -267,6 +284,49 @@ kill "$(cat "$tmp/doomed.pid")" 2>/dev/null || true
 rc=0; "$run" --label after-kill --tokens 3 -- true >/dev/null 2>&1 || rc=$?
 ok "a killed holder frees its tokens at once" '[ "$rc" = 0 ] && [ "$(last ".label,(.lock_wait_s < 1)" | tr "\n" " ")" = "after-kill true " ]'
 
+# Killing gpu-run alone does not free the token while its command still runs (and draws): the
+# command inherits the token's lock.
+: >"$tmp/victim.pid"
+"$run" --label victim -- sh -c 'echo $$ >"$1"; exec sleep 30' sh "$tmp/victim.pid" >/dev/null 2>&1 &
+victim=$!
+for _ in $(seq 100); do [ -s "$tmp/victim.pid" ] && break; sleep 0.1; done
+kill -9 "$victim"
+wait "$victim" 2>/dev/null || true
+sleep 0.3
+ok "a token stays taken while the command of a killed gpu-run still runs" '! flock -n "$(slot 1)" true'
+kill "$(cat "$tmp/victim.pid")" 2>/dev/null || true
+for _ in $(seq 50); do flock -n "$(slot 1)" true && break; sleep 0.1; done
+ok "and is free once the command has gone too" 'flock -n "$(slot 1)" true'
+
+# A long holder of one token and a job that needs them all do not freeze one-token jobs: the
+# waiting job lets the gate go after GATE_PRIORITY_S (2 s here), and a one-token job takes a free
+# token then. A job that waits long says who holds the tokens.
+flock -o "$(slot 1)" sleep 30 &  # -o: the lock is flock's own, so killing flock frees it
+long=$!
+sleep 0.3
+GPU_RUN_GATE_PRIORITY_S=2 "$run" --label render --kind blender -- true >/dev/null 2>"$tmp/render.err" &
+render=$!
+for _ in $(seq 100); do grep -q waiting "$tmp/render.err" && break; sleep 0.1; done
+t0=$SECONDS
+rc=0; timeout 20 "$run" --label single -- true >/dev/null 2>&1 || rc=$?
+ok "a one-token job gets a free token beside a long holder and a waiting heavy job" '[ "$rc" = 0 ] && [ $((SECONDS - t0)) -lt 15 ]'
+ok "the heavy job says it let the gate go" 'grep -q "letting the gate go" "$tmp/render.err"'
+kill "$long"
+wait "$render"
+ok "the heavy job runs once the long holder is gone" '[ "$(last ".label,(.slots | length)" | tr "\n" " ")" = "render 3 " ]'
+"$run" --label holder-job -- sleep 3 >/dev/null 2>&1 &
+holder=$!
+sleep 1
+out="$(TEST_GPU_JOBS=1 GPU_RUN_WAIT_REPORT_S=1 "$run" --label patient -- true 2>&1)"
+wait "$holder"
+ok "a job that waits long names who holds the tokens" '[[ "$out" == *"held now: "*"card-1.lock: gpu-run \"holder-job\" (pid "*") for "* ]]'
+flock -o "$(slot gate)" sleep 30 &
+hung=$!
+sleep 0.3
+rc=0; out="$(GPU_RUN_GATE_WAIT_MAX_S=2 timeout 20 "$run" --label past-the-gate -- true 2>&1)" || rc=$?
+kill "$hung"
+ok "a gate held too long is passed by, with a line saying so" '[ "$rc" = 0 ] && [[ "$out" == *"has been held for over 2 s"*"taking tokens without it"* ]]'
+
 # No deadlock when a three-token job and one-token jobs interleave, and the three-token job is
 # not overtaken by one-token jobs that come after it.
 : >"$tmp/order"
@@ -286,32 +346,90 @@ ok "--no-lock leaves the tokens and the environment alone" '[ "$(last ".exit,.lo
 # Admission: a job waits for a busy, full, warm or recently crashed card, says why, and fails
 # with exit 6 after --admit-wait; it starts as soon as the card settles.
 lines="$(wc -l <"$log")"
+# Every job publishes its readings for others' admission; each fake card here is a different
+# card, so a case starts with none published (fresh_card).
+fresh_card() { rm -rf "$GPU_RUN_STATE/live"; }
 for case in "busy|load averaged 90% over the last 10 s (wanted under 70%)" "full|1.0 GB of video memory free (wanted at least 2 GB)" "warm|the card is at 82 C (wanted under 80 C)"; do
   name="${case%%|*}" want="${case#*|}"
+  fresh_card
   rc=0; out="$(GPU_RUN_SAMPLER="$tmp/$name" "$run" --admit-wait 0.5 --label "$name" -- touch "$tmp/ran-$name" 2>&1)" || rc=$?
   ok "admission refuses a $name card with exit 6, saying why" '[ "$rc" = 6 ] && [[ "$out" == *"waiting for the card to settle: "*"$want"* ]] && [[ "$out" == *"did not settle within 0.5 s"* ]] && [ ! -e "$tmp/ran-$name" ]'
 done
-rc=0; out="$(GPU_RUN_EVENTS="$tmp/fresh-event" "$run" --admit-wait 0 --label crashed -- touch "$tmp/ran-crashed" 2>&1)" || rc=$?
-ok "admission refuses after a driver event in the last 30 minutes" '[ "$rc" = 6 ] && [[ "$out" == *"a display driver event (Windows Error Reporting 1001 at "*") in the last 30 minutes"* ]] && [ ! -e "$tmp/ran-crashed" ]'
+export EVENTS_AGO="$tmp/ago"
+echo "10 plain" >"$EVENTS_AGO"
+t_before="$(date -d "@$(($(date +%s) + 20 * 60))" +%H:%M)"
+rc=0; out="$(GPU_RUN_EVENTS="$tmp/events-ago" "$run" --admit-wait 0 --label crashed -- touch "$tmp/ran-crashed" 2>&1)" || rc=$?
+t_after="$(date -d "@$(($(date +%s) + 20 * 60))" +%H:%M)"
+ok "admission refuses after a driver event in the last 30 minutes, saying when the card takes jobs again" \
+  '[ "$rc" = 6 ] && [[ "$out" == *"(Windows Error Reporting 1001); the card takes jobs again from about $t_before"* || "$out" == *"jobs again from about $t_after"* ]] && [ ! -e "$tmp/ran-crashed" ]'
+printf '35 plain\n5 processed\n' >"$EVENTS_AGO"
+rc=0; GPU_RUN_EVENTS="$tmp/events-ago" "$run" --admit-wait 0 --label late-report -- true >/dev/null 2>&1 || rc=$?
+ok "a processed report filed late counts from the first report of its burst" '[ "$rc" = 0 ]'
+echo "5 processed" >"$EVENTS_AGO"
+rc=0; GPU_RUN_EVENTS="$tmp/events-ago" "$run" --admit-wait 0 --label lone-report -- true >/dev/null 2>&1 || rc=$?
+ok "a processed report with no earlier one counts from its own time" '[ "$rc" = 6 ]'
+unset EVENTS_AGO
 rc=0; GPU_RUN_EVENTS="$tmp/one-event" "$run" --admit-wait 0 --label old-crash -- true >/dev/null 2>&1 || rc=$?
 ok "an older driver event does not hold a job back" '[ "$rc" = 0 ]'
-ok "a refused job writes no record" '[ "$(tail -n +$((lines + 1)) "$log" | jq -r .label)" = old-crash ]'
+ok "a refused job leaves a record saying why, and the report lists it apart" \
+  '[ "$(tail -n +$((lines + 1)) "$log" | jq -r "select(.refused) | .label" | tr "\n" " ")" = "busy full warm crashed lone-report " ] &&
+   [ "$(tail -n +$((lines + 1)) "$log" | jq -r "select(.label == \"crashed\") | [.exit, (.refused | test(\"driver event\"))] | @tsv")" = "$(printf "6\ttrue")" ] &&
+   rep="$("$run" --report)" && [[ "$rep" == *"## Turned away at admission (exit 6)"*"crashed (other) after "*" s: a display driver event"* ]]'
 export TEST_GPU_JOBS=1
+fresh_card
 GPU_RUN_SAMPLER="$tmp/busy" "$run" --admit-wait 0 --label refused -- true >/dev/null 2>&1 || true
 rc=0; "$run" --label next -- true >/dev/null 2>&1 || rc=$?
 ok "a refused job lets its tokens go" '[ "$rc" = 0 ] && [ "$(last ".label,(.lock_wait_s < 1)" | tr "\n" " ")" = "next true " ]'
 unset TEST_GPU_JOBS
 echo 90 >"$tmp/load"
 ( sleep 1.5; echo 10 >"$tmp/load" ) &
+fresh_card
 rc=0; out="$(GPU_RUN_SAMPLER="$tmp/settles" "$run" --admit-wait 20 --label settles -- true 2>&1)" || rc=$?
 ok "a waiting job starts once the card settles, and says so" '[ "$rc" = 0 ] && [[ "$out" == *"waiting for the card to settle: the card'"'"'s load averaged 90%"* ]] && [[ "$out" == *"has settled after"* ]] && [ "$(last ".admit_wait_s >= 1")" = true ]'
 wait
+fresh_card
 rc=0; out="$(GPU_RUN_SAMPLER=false "$run" --label blind -- true 2>&1)" || rc=$?
 ok "a sampler that gives nothing does not hold jobs back, and says admission was not checked" '[ "$rc" = 0 ] && [[ "$out" == *"admission: not checked"* ]]'
 rc=0; TEST_GPU_TOKENS="$tmp/parent-token" GPU_RUN_SAMPLER="$tmp/busy" "$run" --admit-wait 0 --label child -- sh -c '[ "$TEST_GPU_TOKENS" = "'"$tmp/parent-token.use"'" ]' >/dev/null 2>&1 || rc=$?
 ok "a job inside a job skips admission and passes its claim down" '[ "$rc" = 0 ] && [ "$(last ".lock,.slots" | tr "\n" " " | tr -d " ")" = "inherited[]" ]'
 rc=0; GPU_RUN_SAMPLER="$tmp/busy" "$run" --cpu --admit-wait 0 --label cpu-busy -- true >/dev/null 2>&1 || rc=$?
 ok "a --cpu run skips admission" '[ "$rc" = 0 ]'
+fresh_card
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/busy" "$run" --admit-wait 0.5 --admit-timeout-runs --label gate -- touch "$tmp/ran-anyway" 2>&1)" || rc=$?
+ok "--admit-timeout-runs starts anyway after the wait, loudly, and logs it" \
+  '[ "$rc" = 0 ] && [ -e "$tmp/ran-anyway" ] && [[ "$out" == *"STARTING ANYWAY (--admit-timeout-runs): the card did not settle within 0.5 s: the card'"'"'s load averaged 90%"* ]] && [ "$(last ".label,(.admit_timed_out | test(\"load\"))" | tr "\n" " ")" = "gate true " ]'
+# A job waiting for the card to settle holds no token: another job takes it meanwhile.
+export TEST_GPU_JOBS=1
+echo 90 >"$tmp/load"
+fresh_card
+GPU_RUN_SAMPLER="$tmp/settles" "$run" --admit-wait 30 --label slow-to-settle -- true >/dev/null 2>"$tmp/slow.err" &
+slow=$!
+for _ in $(seq 100); do grep -q "waiting for the card to settle" "$tmp/slow.err" && break; sleep 0.1; done
+rc=0; out="$(timeout 10 "$run" --label meanwhile -- true 2>&1)" || rc=$?
+ok "a job waiting for admission holds no token" '[ "$rc" = 0 ] && [[ "$out" != *"waiting for the graphics card"* ]] && kill -0 "$slow"'
+echo 10 >"$tmp/load"
+wait "$slow"
+unset TEST_GPU_JOBS
+# Readings another job's sampler has published over the whole window decide at once: this job's
+# own sampler ("slow-sampler") gives no load readings at all.
+printf '#!/bin/sh\necho %s\nexec sleep 60\n' "'{\"t\":1,\"load\":null,\"types\":{},\"used\":$GiB,\"top\":[],\"cpu\":1,\"adapter\":\"Test Card\",\"total\":$((16 * GiB)),\"temp\":50}'" >"$tmp/slow-sampler"
+chmod +x "$tmp/slow-sampler"
+publish() { # publish load: another job's sampler that has read the card for the last 12 s
+  local now i sep="" samples=""
+  now="$(date +%s)"
+  fresh_card
+  for i in $(seq 12 -1 0); do samples="$samples$sep{\"at\":$((now - i)),\"load\":$1,\"used\":$GiB,\"temp\":50}"; sep=","; done
+  mkdir -p "$GPU_RUN_STATE/live"
+  echo "{\"since\":$((now - 12)),\"total\":$((16 * GiB)),\"samples\":[$samples]}" >"$GPU_RUN_STATE/live/999999.json"
+}
+publish 85
+t0=$SECONDS
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/slow-sampler" "$run" --admit-wait 0 --label shared-busy -- true 2>&1)" || rc=$?
+ok "another sampler's busy readings refuse a job at once" '[ "$rc" = 6 ] && [[ "$out" == *"load averaged 85%"* ]] && [ $((SECONDS - t0)) -lt 5 ]'
+publish 5
+rc=0; GPU_RUN_SAMPLER="$tmp/slow-sampler" "$run" --admit-wait 0 --label shared-calm -- true >/dev/null 2>&1 || rc=$?
+ok "another sampler's calm readings admit a job at once" '[ "$rc" = 0 ] && [ "$(last ".label,(.admit_wait_s < 1)" | tr "\n" " ")" = "shared-calm true " ]'
+rm -f "$GPU_RUN_STATE/live/999999.json"
 
 # The off switch.
 "$run" --off "driver error at 20:36" >/dev/null

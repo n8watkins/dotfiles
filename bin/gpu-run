@@ -616,29 +616,61 @@ def ago(since):
     return f"{secs / 60:.0f} min" if secs >= 60 else f"{secs:.0f} s"
 
 
+def flock_on(line, st):
+    """Whether a /proc/locks or fdinfo "lock:" line is a held flock on the file `st` describes."""
+    parts = line.split()
+    if "->" in parts or "FLOCK" not in parts:  # "->": waiting, not holding
+        return False
+    try:
+        i = parts.index("FLOCK")
+        major, minor, ino = parts[i + 4].split(":")
+        return (int(ino) == st.st_ino and int(major, 16) == os.major(st.st_dev)
+                and int(minor, 16) == os.minor(st.st_dev))
+    except (ValueError, IndexError):
+        return False
+
+
 def lock_holders(path):
-    """The processes holding a flock on `path`, from /proc/locks (whoever they are, whatever they
-    wrote), leaving out this process."""
+    """The live processes holding a flock on `path` (whoever they are, whatever they wrote),
+    leaving out this process.
+
+    A flock belongs to an open file, not to a process: the test helper takes its locks with the
+    flock utility on a descriptor its shell then hands to `cat`, so /proc/locks names the flock
+    process, which has already exited. The holders are found instead through the descriptors that
+    still have the file open (/proc/<pid>/fd), whose fdinfo lists the lock; /proc/locks is the
+    fallback for processes whose descriptors cannot be read."""
     try:
         st = os.stat(path)
-        with open("/proc/locks") as f:
-            lines = f.read().splitlines()
     except OSError:
         return []
-    out = []
-    for line in lines:
-        parts = line.split()
-        if "->" in parts or len(parts) < 6 or parts[1] != "FLOCK":  # "->": waiting, not holding
+    out, me = [], os.getpid()
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) == me:
             continue
         try:
-            pid = int(parts[4])
-            major, minor, ino = parts[5].split(":")
-            same = (int(ino) == st.st_ino and int(major, 16) == os.major(st.st_dev)
-                    and int(minor, 16) == os.minor(st.st_dev))
-        except ValueError:
+            fds = os.listdir(f"/proc/{d}/fd")
+        except OSError:
             continue
-        if same and pid != os.getpid() and pid not in out and os.path.exists(f"/proc/{pid}"):
-            out.append(pid)
+        for fd in fds:
+            try:
+                fst = os.stat(f"/proc/{d}/fd/{fd}")
+                if (fst.st_ino, fst.st_dev) != (st.st_ino, st.st_dev):
+                    continue
+                with open(f"/proc/{d}/fdinfo/{fd}") as f:
+                    if any(line.startswith("lock:") and flock_on(line, st) for line in f):
+                        out.append(int(d))
+                        break
+            except OSError:
+                continue
+    try:
+        with open("/proc/locks") as f:
+            for line in f:
+                if flock_on(line, st):
+                    pid = int(line.split()[line.split().index("FLOCK") + 3])
+                    if pid not in out and pid != me and os.path.exists(f"/proc/{pid}"):
+                        out.append(pid)
+    except (OSError, ValueError, IndexError):
+        pass
     return out
 
 

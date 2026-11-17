@@ -312,6 +312,23 @@ ok "a leftover that holds a token is named loudly when the job ends" \
 ok "and logged with the job" '[ "$(last ".label,(.left_holding | length > 0)" | tr "\n" " ")" = "leaves-a-job true " ]'
 out="$(GPU_RUN_WAIT_REPORT_S=1 "$run" --label after-leftover -- true 2>&1)"
 ok "a waiting job names a leftover holder it learns from /proc/locks" '[[ "$out" == *"held now: "*"card-1.lock: pid "*"--label inner-left"*") for "* ]]'
+# The party-games test helper holds its locks as below (HOLD_LOCK in lobby/test/browser.mjs): the
+# flock utility locks a descriptor of the shell, which then becomes `cat`, so /proc/locks names
+# the flock process, long gone. The holder is still found (through its open descriptor) and named.
+cat >"$tmp/helper-hold" <<'EOF'
+#!/bin/sh
+# A test script under the job: holds its job's card token shared, as the helper's claim does.
+sleep 8 2>/dev/null | sh -c 'exec 9<>"$1" || exit 1
+flock -n -s 9 || exit 1
+echo held
+exec cat >/dev/null' hold-lock "$TEST_GPU_TOKENS" >/dev/null 2>&1 &
+EOF
+chmod +x "$tmp/helper-hold"
+out="$("$run" --label leaves-a-helper -- sh -c '"$1"; sleep 1.5' sh "$tmp/helper-hold" 2>&1)"
+ok "a leftover helper-style holder is named loudly when the job ends" \
+  '[[ "$out" == *"LEFT RUNNING AND HOLDING A CARD TOKEN: pid "*"(cat under "*" holds "*"card-1.lock"* ]] && [ "$(last ".label,(.left_holding | length > 0)" | tr "\n" " ")" = "leaves-a-helper true " ]'
+out="$(GPU_RUN_WAIT_REPORT_S=1 "$run" --label after-helper -- true 2>&1)"
+ok "a waiting job names a helper-style holder, not \"no details\"" '[[ "$out" == *"held now: "*"card-1.lock: pid "*"(cat under "*") for "* ]] && [[ "$out" != *"no details"* ]]'
 unset TEST_GPU_JOBS
 
 # A long holder of one token and a job that needs them all do not freeze one-token jobs: the

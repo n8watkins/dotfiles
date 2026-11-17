@@ -10,7 +10,8 @@ description: Use when a task would run a render, a browser test, a model or any 
   A job takes 1 token; a job that runs several card browsers side by side asks for more with `--tokens N`, and a heavy job (`--kind blender`, `image` or `model`) takes them all, so nothing draws beside a render.
   Another repo's Playwright run on the card with N workers is N browsers: `--tokens N`.
   The party-games pre-deploy gate: `gpu-run --label gate --kind browser-test --tokens 3 --admit-timeout-runs -- npm run predeploy`.
-  Whatever the command starts draws only on its job's tokens (passed down in `TEST_GPU_TOKENS`), never on more, and the tokens stay taken while any process of the job runs.
+  Whatever the command starts draws only on its job's tokens (passed down in `TEST_GPU_TOKENS`), never on more; a token stays taken while anything of the job that draws (a test helper, a `gpu-run` inside it) still runs.
+  A job that ends with such a process still running says `LEFT RUNNING AND HOLDING A CARD TOKEN`: stop that process, it blocks other jobs.
   The cap of 3 only fully holds once every checkout running card tests has the party-games helper with the token pool: an older `lobby/test/browser.mjs` counts 4 slots and takes them without the gate.
   Only the owner raises the pool; never add another lock or raise `TEST_GPU_JOBS` to get around a wait.
   A job that waits long says who holds the tokens (pid, label, how long).

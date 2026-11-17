@@ -16,9 +16,10 @@ taken all at once or not at all, under a gate file (/tmp/test-gpu-gate.lock) tha
 waiting for several tokens go before single-token jobs that come after it, for a few minutes at a
 time (GATE_PRIORITY_S); a job that waits long says who holds the tokens.
 The command gets the tokens in TEST_GPU_TOKENS, and the test helper and a gpu-run inside it draw
-only on those, claiming one each, instead of taking more from the pool. The command also inherits
-the token locks, so a token stays taken while any process of the job runs, even after gpu-run
-itself is killed.
+only on those, claiming one each, instead of taking more from the pool. They also hold the card
+token themselves, so it stays taken while they run, even after gpu-run itself is killed. The
+command does not inherit gpu-run's locks: a background process it leaves holds no token, and one
+that does (a helper or gpu-run left running) is named loudly at the end and logged.
 A job refuses to start while TEST_NO_GPU=1 is set or the OFF marker exists.
 
 Admission: before it takes its tokens, a job waits until the card can take it: the busiest
@@ -130,6 +131,7 @@ ADMIT_MAX_WAIT_S = 45 * 60  # comfortably longer than the event window; then exi
 #                             --admit-timeout-runs the job starts anyway, with a loud line
 ADMIT_EVENT_RECHECK_S = 60  # how often the event log is asked again while a job waits
 LIVE = os.path.join(STATE, "live")  # recent samples of every running sampler, for admission
+LIVE_FUTURE_SLACK_S = 5  # a published reading dated further ahead than this is ignored
 ADAPTER = os.environ.get("GPU_RUN_ADAPTER") or "RX 7800"
 INTERVAL = 2.0
 HOT_READINGS = 3  # readings in a row above --max-temp that stop a job (one spike does not)
@@ -606,8 +608,97 @@ def holder_text(path):
         os.kill(pid, 0)
     except (OSError, ValueError, KeyError):
         return None
-    mins = (time.time() - since) / 60
-    return f"{d.get('what', '?')} (pid {pid}) for {mins:.0f} min" if mins >= 1 else f"{d.get('what', '?')} (pid {pid}) for {mins * 60:.0f} s"
+    return f"{d.get('what', '?')} (pid {pid}) for {ago(since)}"
+
+
+def ago(since):
+    secs = time.time() - since
+    return f"{secs / 60:.0f} min" if secs >= 60 else f"{secs:.0f} s"
+
+
+def lock_holders(path):
+    """The processes holding a flock on `path`, from /proc/locks (whoever they are, whatever they
+    wrote), leaving out this process."""
+    try:
+        st = os.stat(path)
+        with open("/proc/locks") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        parts = line.split()
+        if "->" in parts or len(parts) < 6 or parts[1] != "FLOCK":  # "->": waiting, not holding
+            continue
+        try:
+            pid = int(parts[4])
+            major, minor, ino = parts[5].split(":")
+            same = (int(ino) == st.st_ino and int(major, 16) == os.major(st.st_dev)
+                    and int(minor, 16) == os.minor(st.st_dev))
+        except ValueError:
+            continue
+        if same and pid != os.getpid() and pid not in out and os.path.exists(f"/proc/{pid}"):
+            out.append(pid)
+    return out
+
+
+def describe_pid(pid):
+    """A process for a person: its command line (a lock-holding `cat` or `flock` stands for the
+    process that started it) and how long it has run."""
+    def cmdline(p):
+        try:
+            with open(f"/proc/{p}/cmdline", "rb") as f:
+                return f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            return "?"
+
+    def stat(p):
+        with open(f"/proc/{p}/stat") as f:
+            s = f.read()
+        return s[s.rfind(")") + 2:].split()
+
+    cmd = cmdline(pid)
+    try:
+        st = stat(pid)
+        if os.path.basename(cmd.split(" ")[0]) in ("cat", "flock", "sh"):
+            cmd = f"{cmd} under {cmdline(int(st[1]))}"
+        with open("/proc/uptime") as f:
+            up = float(f.read().split()[0])
+        started = time.time() - up + int(st[19]) / os.sysconf("SC_CLK_TCK")
+        return f"pid {pid} ({short(cmd)[:120]}) for {ago(started)}"
+    except (OSError, ValueError, IndexError):
+        return f"pid {pid} ({short(cmd)[:120]})"
+
+
+def parent_of(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            s = f.read()
+        return int(s[s.rfind(")") + 2:].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def written_pid(path):
+    try:
+        with open(path) as f:
+            return int(dict(kv.split("=", 1) for kv in f.read().strip().split(" ", 2) if "=" in kv)["pid"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def holder_or_locker(path):
+    """Who holds `path`. The real holders come from /proc/locks; what a holder wrote into the
+    file names it better, and is used when it is one of them (or started one: the test helper
+    holds its locks through a small child)."""
+    pids = lock_holders(path)
+    for f in (path, root_token(path)):
+        w = written_pid(f)
+        if w and (not pids or w in pids or any(parent_of(p) == w for p in pids)):
+            text = holder_text(f)
+            if text:
+                return text
+    return "; ".join(describe_pid(p) for p in pids) if pids else "no details"
 
 
 def is_busy(path):
@@ -628,10 +719,9 @@ class Pool:
     The machine's pool is /tmp/test-gpu-<n>.lock, n = 1 to TEST_GPU_JOBS (the files the
     party-games test helper takes too), with /tmp/test-gpu-gate.lock as its gate. A token is
     taken while anyone holds any lock on its file: the taker checks it is free with an exclusive
-    lock and then holds it shared, so every process of the job can hold it too (the command
-    inherits gpu-run's lock, and the test helper and a gpu-run inside the job take their own
-    shared lock on it). So the token stays taken until the last process of the job is gone, even
-    when gpu-run itself is killed.
+    lock and then holds it shared, so the processes of the job that draw can hold it too (the
+    test helper and a gpu-run inside the job take their own shared lock on it). So the token stays
+    taken until the last of them is gone, even when gpu-run itself is killed.
     A process whose ancestor holds tokens (TEST_GPU_TOKENS) uses only those: its pool is one
     "<token>.use" file per inherited token, with "<first token>.gate" as the gate, so the processes
     below one job never draw more than the job holds, and what they hold is passed on the same
@@ -688,12 +778,11 @@ class Pool:
         return None
 
     def holders(self):
-        """One line per busy token: who holds it and for how long, where it says."""
+        """One line per busy token: who holds it and for how long."""
         out = []
         for path in self.tokens:
             if is_busy(path):
-                who = holder_text(path) or holder_text(root_token(path)) or "no details (an older gpu-run or test helper)"
-                out.append(f"{short(path)}: {who}")
+                out.append(f"{short(path)}: {holder_or_locker(path)}")
         return out
 
     def take(self, want, label):
@@ -735,10 +824,10 @@ class Pool:
                         gate_wait_from = gate_wait_from or now
                         waited = now - gate_wait_from
                         if waited > 2:  # a taker holds it only for a moment unless it waits itself
-                            say("gate", f"another job is first in line for tokens ({holder_text(self.gate) or 'no details'})")
+                            say("gate", f"another job is first in line for tokens ({holder_or_locker(self.gate)})")
                         if waited > GATE_WAIT_MAX_S:
                             print(f"gpu-run: the gate {short(self.gate)} has been held for over {GATE_WAIT_MAX_S:g} s "
-                                  f"({holder_text(self.gate) or 'no details'}); taking tokens without it", file=sys.stderr)
+                                  f"({holder_or_locker(self.gate)}); taking tokens without it", file=sys.stderr)
                             skip_gate = True
                 if gate is not None or skip_gate:
                     held = self._try(want, label)
@@ -1003,15 +1092,29 @@ def shared_readings(now):
                 continue
             with open(path) as f:
                 d = json.load(f)
-            samples = d["samples"]
-            if not samples or d["since"] > now - ADMIT_WINDOW_S or samples[-1]["at"] < now - (2 * INTERVAL + 1):
+            samples, since, total = d["samples"], d["since"], d.get("total")
+            # A file that is not what a sampler writes is skipped whole, never trusted in part.
+            if not (isinstance(samples, list) and finite(since) and (total is None or finite(total))):
                 continue
-        except (OSError, ValueError, KeyError, TypeError):
+            if not all(isinstance(s, dict) and finite(s.get("at"))
+                       and all(s.get(k) is None or finite(s.get(k)) for k in ("load", "used", "temp"))
+                       for s in samples):
+                continue
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        # Readings dated ahead of this machine's clock (a clock step) do not count.
+        samples = [s for s in samples if s["at"] <= now + LIVE_FUTURE_SLACK_S]
+        if not samples or since > now - ADMIT_WINDOW_S or samples[-1]["at"] < now - (2 * INTERVAL + 1):
             continue
         window = [s for s in samples if s["at"] >= now - ADMIT_WINDOW_S]
         if any(s.get("load") is not None for s in window) and (best is None or samples[-1]["at"] > best[2]):
-            best = (window, d.get("total"), samples[-1]["at"])
+            best = (window, total, samples[-1]["at"])
     return best[:2] if best else None
+
+
+def finite(x):
+    """A real number (not a bool, not NaN or infinity)."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
 
 
 def recent_driver_event(now):
@@ -1090,7 +1193,9 @@ def run_job(args, command):
     while True:
         if check:
             t_admit = time.monotonic()
-            why = admission(sampler, args.admit_wait)
+            # One allowance across every round: a card that keeps getting busy while the job
+            # waits for tokens still ends in exit 6 (or the start anyway) after --admit-wait.
+            why = admission(sampler, max(0.0, args.admit_wait - admit_wait))
             admit_wait = round(admit_wait + time.monotonic() - t_admit, 1)
             if why and not args.admit_timeout_runs:
                 print(f"gpu-run: not started: the card did not settle within {args.admit_wait:g} s: {why}", file=sys.stderr)
@@ -1140,9 +1245,14 @@ def run_job(args, command):
     ru0 = resource.getrusage(resource.RUSAGE_CHILDREN)
     t0, start = time.monotonic(), time.time()
     try:
-        # The command inherits the job's token locks, so the tokens stay taken while it runs,
-        # even if gpu-run itself is killed.
-        proc = subprocess.Popen(command, env=env, pass_fds=lock_fds)
+        # The token locks are not passed to the command: whatever it leaves running (a dev server
+        # started with &, a Worker) would hold them for its whole life after the job. What draws
+        # keeps its token by itself: the party-games test helper and a gpu-run inside this job
+        # hold the card token shared for as long as they run (Pool._claim, claim in
+        # lobby/test/browser.mjs), even if this gpu-run is killed. A command that draws without
+        # either (Blender, another repo's runner) is covered while gpu-run lives, which is to its
+        # end unless gpu-run itself is killed outright.
+        proc = subprocess.Popen(command, env=env)
     except OSError as e:
         print(f"gpu-run: cannot run {command[0]}: {e}", file=sys.stderr)
         sampler.stop()
@@ -1180,6 +1290,19 @@ def run_job(args, command):
     sampler.stop()
     for fd in lock_fds:
         os.close(fd)
+    # Something the command left running that still holds one of this job's tokens (a test
+    # helper or a gpu-run started in the background) keeps it taken, since it can still draw:
+    # say so loudly, name it, and log it.
+    left_holding = []
+    if tokens:
+        mine = set(job_tree(keep))
+        for path in dict.fromkeys(tokens + [root_token(t) for t in tokens]):
+            for pid in lock_holders(path):
+                if pid in mine:
+                    left_holding.append({"pid": pid, "token": short(path), "what": describe_pid(pid)})
+        for h in left_holding:
+            print(f"gpu-run: LEFT RUNNING AND HOLDING A CARD TOKEN: {h['what']} holds {h['token']}; "
+                  f"it counts against the card's tokens until it ends", file=sys.stderr)
     rec = {
         "v": 1,
         "start": now_iso(start),
@@ -1201,6 +1324,7 @@ def run_job(args, command):
         "avg_cores": round(cpu / wall, 2) if wall > 0 else None,
         "cpu_complete": reaper and not left,
         "left_running": left,
+        **({"left_holding": left_holding} if left_holding else {}),
         "loadavg_start": load0,
         "loadavg_end": loadavg(),
         "gpu": sampler.summary(first),

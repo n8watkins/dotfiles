@@ -284,10 +284,10 @@ kill "$(cat "$tmp/doomed.pid")" 2>/dev/null || true
 rc=0; "$run" --label after-kill --tokens 3 -- true >/dev/null 2>&1 || rc=$?
 ok "a killed holder frees its tokens at once" '[ "$rc" = 0 ] && [ "$(last ".label,(.lock_wait_s < 1)" | tr "\n" " ")" = "after-kill true " ]'
 
-# Killing gpu-run alone does not free the token while its command still runs (and draws): the
-# command inherits the token's lock.
+# Killing gpu-run alone does not free the token while what draws under it still runs: a gpu-run
+# inside the job (or the party-games test helper) holds the card token itself.
 : >"$tmp/victim.pid"
-"$run" --label victim -- sh -c 'echo $$ >"$1"; exec sleep 30' sh "$tmp/victim.pid" >/dev/null 2>&1 &
+"$run" --label victim -- "$run" --label drawing -- sh -c 'echo $$ >"$1"; exec sleep 30' sh "$tmp/victim.pid" >/dev/null 2>&1 &
 victim=$!
 for _ in $(seq 100); do [ -s "$tmp/victim.pid" ] && break; sleep 0.1; done
 kill -9 "$victim"
@@ -297,6 +297,22 @@ ok "a token stays taken while the command of a killed gpu-run still runs" '! flo
 kill "$(cat "$tmp/victim.pid")" 2>/dev/null || true
 for _ in $(seq 50); do flock -n "$(slot 1)" true && break; sleep 0.1; done
 ok "and is free once the command has gone too" 'flock -n "$(slot 1)" true'
+
+# What a job leaves running keeps no token unless it can draw. A plain background process (a dev
+# server started with &) holds none once gpu-run has gone; a gpu-run left in the background does,
+# and the job says so loudly, logs it, and a waiting job names it from /proc/locks.
+export TEST_GPU_JOBS=1
+: >"$tmp/bg.pid"
+"$run" --label leaves-a-server -- sh -c 'sleep 30 & echo $! >"$1"' sh "$tmp/bg.pid" >/dev/null 2>&1
+ok "a background process left by the command holds no token" 'kill -0 "$(cat "$tmp/bg.pid")" && flock -n "$(slot 1)" true'
+kill "$(cat "$tmp/bg.pid")" 2>/dev/null || true
+out="$("$run" --label leaves-a-job -- sh -c '"$1" --label inner-left -- sleep 6 >/dev/null 2>&1 & sleep 1.5' sh "$run" 2>&1)"
+ok "a leftover that holds a token is named loudly when the job ends" \
+  '[[ "$out" == *"LEFT RUNNING AND HOLDING A CARD TOKEN: pid "*"--label inner-left"*" holds "*"card-1.lock; it counts against the card'"'"'s tokens until it ends"* ]]'
+ok "and logged with the job" '[ "$(last ".label,(.left_holding | length > 0)" | tr "\n" " ")" = "leaves-a-job true " ]'
+out="$(GPU_RUN_WAIT_REPORT_S=1 "$run" --label after-leftover -- true 2>&1)"
+ok "a waiting job names a leftover holder it learns from /proc/locks" '[[ "$out" == *"held now: "*"card-1.lock: pid "*"--label inner-left"*") for "* ]]'
+unset TEST_GPU_JOBS
 
 # A long holder of one token and a job that needs them all do not freeze one-token jobs: the
 # waiting job lets the gate go after GATE_PRIORITY_S (2 s here), and a one-token job takes a free
@@ -430,6 +446,42 @@ publish 5
 rc=0; GPU_RUN_SAMPLER="$tmp/slow-sampler" "$run" --admit-wait 0 --label shared-calm -- true >/dev/null 2>&1 || rc=$?
 ok "another sampler's calm readings admit a job at once" '[ "$rc" = 0 ] && [ "$(last ".label,(.admit_wait_s < 1)" | tr "\n" " ")" = "shared-calm true " ]'
 rm -f "$GPU_RUN_STATE/live/999999.json"
+# A published file that is not what a sampler writes is skipped whole: no crash, and the job's own
+# readings (a busy card here) decide. Readings dated an hour ahead (a clock step) do not count.
+for case in nondict noat strload nan future; do
+  fresh_card
+  mkdir -p "$GPU_RUN_STATE/live"
+  now="$(date +%s)"
+  good="{\"at\":$((now - 1)),\"load\":5,\"used\":$GiB,\"temp\":50}"
+  case "$case" in
+    nondict) samples="\"junk\",$good" ;;
+    noat) samples="{\"load\":5},$good" ;;
+    strload) samples="{\"at\":$((now - 1)),\"load\":\"high\",\"used\":$GiB,\"temp\":50}" ;;
+    nan) samples="{\"at\":$((now - 1)),\"load\":NaN,\"used\":$GiB,\"temp\":50}" ;;
+    future) samples="{\"at\":$((now + 3600)),\"load\":5,\"used\":$GiB,\"temp\":50}" ;;
+  esac
+  echo "{\"since\":$((now - 60)),\"total\":$((16 * GiB)),\"samples\":[$samples]}" >"$GPU_RUN_STATE/live/999999.json"
+  rc=0; out="$(GPU_RUN_SAMPLER="$tmp/busy" "$run" --admit-wait 0 --label "garbage-$case" -- true 2>&1)" || rc=$?
+  ok "a published file with $case readings is skipped, not trusted and not a crash" '[ "$rc" = 6 ] && [[ "$out" != *Traceback* ]] && [[ "$out" == *"load averaged 90%"* ]]'
+done
+rm -f "$GPU_RUN_STATE/live/999999.json"
+# One admission allowance across rounds: a job admitted after about 3 s, that then waits over
+# ADMIT_WINDOW_S for its token while the card gets busy, has only the rest of --admit-wait left.
+export TEST_GPU_JOBS=1
+fresh_card
+echo 90 >"$tmp/load"
+flock -o "$(slot 1)" sleep 18 &
+long=$!
+sleep 0.3
+( sleep 3; echo 10 >"$tmp/load"; sleep 5; echo 90 >"$tmp/load" ) &
+flips=$!
+t0=$SECONDS
+rc=0; out="$(GPU_RUN_SAMPLER="$tmp/settles" "$run" --admit-wait 6 --label rounds -- true 2>&1)" || rc=$?
+took=$((SECONDS - t0))
+wait "$long" "$flips" 2>/dev/null || true
+ok "admission time counts across rounds, so the job still ends after --admit-wait" \
+  '[ "$rc" = 6 ] && [[ "$out" == *"got busy while this job waited for its tokens"* ]] && [ "$took" -lt 22 ]'
+unset TEST_GPU_JOBS
 
 # The off switch.
 "$run" --off "driver error at 20:36" >/dev/null

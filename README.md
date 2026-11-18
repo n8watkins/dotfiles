@@ -138,8 +138,16 @@ gpu-run --report --since 2026-11-01
 gpu-run --off "driver error during a render"   # every GPU job refuses until --on
 ```
 
-- It takes a free card slot (`/tmp/test-gpu-<n>.lock`, n = 1 to `TEST_GPU_JOBS`, default 4, plain `flock` files) and waits while all are in use; `--kind blender`, `image` or `model` takes every slot.
+- It counts browsers that may draw at once, not jobs: a pool of tokens (`/tmp/test-gpu-<n>.lock`, n = 1 to `TEST_GPU_JOBS`, default 3, plain `flock` files).
+  A job takes one token, or `--tokens N`; `--kind blender`, `image` or `model` takes every token.
+  Tokens are taken all at once or not at all, so nothing deadlocks; a gate file lets a job waiting for several go before single-token jobs that come after it, for at most three minutes at a time, and a gate held for ten minutes is passed by.
+  A job that waits long says who holds the tokens (pid, label, how long), as the holders write it into the lock files.
+  A token is held shared after an exclusive check; the party-games test helper and a `gpu-run` inside the job hold it shared too, so it stays taken while anything of the job that draws still runs, even after `gpu-run` itself is killed.
+  The command does not inherit the lock, so a background process it leaves (a dev server started with `&`) holds no token; a leftover that does hold one is named loudly when the job ends and logged (`left_holding`), and a waiting job names every holder from `/proc/locks`.
+  The command gets the tokens in `TEST_GPU_TOKENS`, and the party-games test helper or a `gpu-run` inside it claims one of those (a `<token>.use` lock, plus a shared hold on the token) instead of taking more from the pool.
   It refuses while `TEST_NO_GPU=1` is set or the off marker exists.
+- Admission: before it takes its tokens, a job waits until the card can take it (load averaged under 70% over the last 10 s, 2 GB of video memory free, under 80 C, no display driver event in the last 30 minutes, a late processed report counting from the first), says why, and gives up with exit 6 after `--admit-wait` seconds (default 2700), leaving a log record; `--admit-timeout-runs` starts anyway with a loud line instead.
+  Every sampler publishes its recent readings in `~/.local/state/gpu/live/`, so while another job runs the check costs nothing; otherwise the job's own sampler takes about ten seconds.
 - One long-lived PowerShell process reads the Windows GPU counters every two seconds (overall load, video memory, top processes by video memory) for the adapter named in `GPU_RUN_ADAPTER` (default `RX 7800`), found through its LUID in the DirectX registry keys, and the same adapter's temperature and fan speed (the adapter performance data Task Manager reads).
   A sample costs a few milliseconds after a first read of about five seconds; no window is shown.
 - `--max-temp <C>` (above 0, at most 110) refuses (exit 5) while the card is hotter than that, and stops the job (exit 5) after three readings in a row above it; one hot reading or a missing one does not stop it.

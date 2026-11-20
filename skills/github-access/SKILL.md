@@ -15,6 +15,10 @@ The owner can perform the approved operation in their terminal, then the agent v
 
 ## Deleting a repository
 
+In Codex, the owner performs the complete grant/delete/revoke sequence in steps 2-4 in their own terminal.
+The guard denies both scope changes as well as the deletion; do not start a partial sequence that leaves the temporary scope granted.
+The agent confirms scope in step 1 and verifies revocation with the read-only check in step 5.
+
 1. Confirm the exact repository with the owner, and check it is not still useful (backed up, archived elsewhere, or empty).
 2. Run `gh auth refresh -h github.com -s delete_repo` in the background, read the one-time code from its output, and give the owner the code and https://github.com/login/device to approve.
 3. Run `gh repo delete <owner>/<repo> --yes` only through the approved path for the current harness.

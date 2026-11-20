@@ -3,6 +3,14 @@
 # aside to <file>.pre-dotfiles once, and links already pointing here are kept.
 set -euo pipefail
 repo="$(cd "$(dirname "$0")" && pwd)"
+if [ "$#" -eq 0 ]; then
+  target_home="$HOME"
+elif [ "$#" -eq 2 ] && [ "$1" = "--target-home" ] && [[ "$2" = /* ]]; then
+  target_home="$2"
+else
+  echo "usage: install.sh [--target-home /absolute/path]" >&2
+  exit 2
+fi
 
 link() { # link <repo path> <target>
   local src="$repo/$1" dst="$2"
@@ -29,53 +37,55 @@ block() {
 }
 
 # One rules file for every agent.
-link home/AGENTS.md "$HOME/AGENTS.md"
-link home/AGENTS.md "$HOME/.claude/CLAUDE.md"
-link home/AGENTS.md "$HOME/.codex/AGENTS.md"
+link home/AGENTS.md "$target_home/AGENTS.md"
+link home/AGENTS.md "$target_home/.claude/CLAUDE.md"
+link home/AGENTS.md "$target_home/.codex/AGENTS.md"
 
 # Package install cooldown (npm and pnpm).
-block home/.npmrc "$HOME/.npmrc"
-block home/.config/pnpm/config.yaml "$HOME/.config/pnpm/config.yaml"
+block home/.npmrc "$target_home/.npmrc"
+block home/.config/pnpm/config.yaml "$target_home/.config/pnpm/config.yaml"
 
 # Hooks.
-link home/.claude/hooks/confirm-destructive-git.sh "$HOME/.claude/hooks/confirm-destructive-git.sh"
-link home/.claude/hooks/confirm-cloudflare-delete.sh "$HOME/.claude/hooks/confirm-cloudflare-delete.sh"
-# Codex keeps hooks in config.toml next to settings it rewrites itself, so this
-# repo owns only a marked block in it.
-block home/.codex/config.hooks.toml "$HOME/.codex/config.toml"
+link home/.claude/hooks/confirm-destructive-git.sh "$target_home/.claude/hooks/confirm-destructive-git.sh"
+link home/.claude/hooks/confirm-cloudflare-delete.sh "$target_home/.claude/hooks/confirm-cloudflare-delete.sh"
 # Codex command rules (secrets, backup, Hello, releases). Codex reads every
 # .rules file in ~/.codex/rules and writes its own approvals to default.rules.
-link home/.codex/rules/guardrails.rules "$HOME/.codex/rules/guardrails.rules"
+link home/.codex/rules/guardrails.rules "$target_home/.codex/rules/guardrails.rules"
 
 # Destructive command guard (dcg): settings, exceptions and the n8 rule pack.
-link home/.config/dcg/config.toml "$HOME/.config/dcg/config.toml"
-link home/.config/dcg/allowlist.toml "$HOME/.config/dcg/allowlist.toml"
+link home/.config/dcg/config.toml "$target_home/.config/dcg/config.toml"
+link home/.config/dcg/allowlist.toml "$target_home/.config/dcg/allowlist.toml"
 for f in "$repo"/home/.config/dcg/packs/*.yaml; do
-  link "home/.config/dcg/packs/$(basename "$f")" "$HOME/.config/dcg/packs/$(basename "$f")"
+  link "home/.config/dcg/packs/$(basename "$f")" "$target_home/.config/dcg/packs/$(basename "$f")"
 done
-if [ ! -x "$HOME/.local/bin/dcg" ]; then
-  echo "dcg is not installed: the guard hooks fail open until it is (see README, Destructive command guard)"
+if [ ! -x "$target_home/.local/bin/dcg" ]; then
+  echo "dcg is not installed at $target_home/.local/bin/dcg. Codex Bash calls will be blocked once the dcg hook is trusted."
 fi
 for f in "$repo"/bin/*; do
   case "$f" in *.test.sh) continue ;; esac
-  link "bin/$(basename "$f")" "$HOME/.local/bin/$(basename "$f")"
+  link "bin/$(basename "$f")" "$target_home/.local/bin/$(basename "$f")"
 done
-for f in "$repo"/home/.config/agent-hooks/*.sh; do
-  link "home/.config/agent-hooks/$(basename "$f")" "$HOME/.config/agent-hooks/$(basename "$f")"
+for f in "$repo"/home/.config/agent-hooks/*.{sh,py}; do
+  [ -f "$f" ] || continue
+  case "$f" in *.test.sh|*.test.py|*_test.py|*/test_*.py) continue ;; esac
+  link "home/.config/agent-hooks/$(basename "$f")" "$target_home/.config/agent-hooks/$(basename "$f")"
 done
+
+# Codex writes other settings and hook trust to this file.
+python3 -I "$repo/scripts/install-codex-hooks.py" "$repo/home/.codex/config.hooks.toml" "$target_home"
 
 # Playbooks: the shared skills folder, linked for Claude and Codex too.
 for s in "$repo"/skills/*/; do
   name="$(basename "$s")"
-  link "skills/$name" "$HOME/.agents/skills/$name"
-  link "skills/$name" "$HOME/.claude/skills/$name"
-  link "skills/$name" "$HOME/.codex/skills/$name"
+  link "skills/$name" "$target_home/.agents/skills/$name"
+  link "skills/$name" "$target_home/.claude/skills/$name"
+  link "skills/$name" "$target_home/.codex/skills/$name"
 done
 
 # Claude settings are copied, not linked: Claude Code rewrites this file itself.
-if [ ! -e "$HOME/.claude/settings.json" ]; then
-  cp "$repo/home/.claude/settings.json" "$HOME/.claude/settings.json"
+if [ ! -e "$target_home/.claude/settings.json" ]; then
+  cp "$repo/home/.claude/settings.json" "$target_home/.claude/settings.json"
   echo "copied settings.json"
-elif ! diff -q "$repo/home/.claude/settings.json" "$HOME/.claude/settings.json" >/dev/null; then
-  echo "settings.json differs from the repo copy: diff $repo/home/.claude/settings.json ~/.claude/settings.json"
+elif ! diff -q "$repo/home/.claude/settings.json" "$target_home/.claude/settings.json" >/dev/null; then
+  echo "settings.json differs from the repo copy: diff $repo/home/.claude/settings.json $target_home/.claude/settings.json"
 fi

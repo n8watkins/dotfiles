@@ -3,11 +3,27 @@
 
 # Destructive command guard (dcg).
 [[hooks.PreToolUse]]
-matcher = "Bash"
+matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/home/natkins/.local/bin/dcg"
+command = "/home/natkins/.local/bin/dcg || { dcg_exit=$?; if [ \"$dcg_exit\" -ne 2 ]; then printf '%s\\n' 'Codex could not run dcg. Report this block to the owner.' >&2; fi; exit 2; }"
+
+# Confirmations shared with Claude Code.
+[[hooks.PreToolUse]]
+matcher = "^(Bash|mcp__.*cloudflare[-_]api__execute)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/bin/python3 -I /home/natkins/.config/agent-hooks/codex-pre-tool-use.py || { printf '%s\\n' 'Codex could not run its PreToolUse guard. Report this block to the owner.' >&2; exit 2; }"
+timeout = 10
+
+# Keep the existing lifecycle order so the legacy trust indices stay valid.
+[[hooks.SessionStart]]
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/home/natkins/.config/agent-hooks/normalize-agents-md.sh 2>/dev/null || true"
 
 # Config lock: report agent config changes the owner has not approved.
 [[hooks.SessionStart]]
@@ -15,3 +31,13 @@ command = "/home/natkins/.local/bin/dcg"
 [[hooks.SessionStart.hooks]]
 type = "command"
 command = "/home/natkins/.local/bin/agent-lock hook codex-session-start"
+
+[[hooks.Stop]]
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/home/natkins/.config/agent-hooks/normalize-agents-md.sh 2>/dev/null || true"
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "/home/natkins/.config/agent-hooks/commit-reminder.sh 2>/dev/null || true"

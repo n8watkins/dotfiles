@@ -64,7 +64,8 @@ Repository checks remain part of doing the work; the existing Stop hook only rem
 The Codex adapter converts an ask decision into a supported denial.
 It does not approve calls, copy the parser logic or treat Codex's permission mode as Claude's auto-mode classifier.
 If the selected guard crashes, returns invalid output or exceeds the adapter's deadline, the adapter denies the call.
-An unavailable adapter interpreter or a failure before the adapter starts remains a harness-level failure; these scripts are guardrails, not a sandbox.
+The Codex registrations also block on a missing guard script or interpreter through an exit-2 shell fallback.
+An outer harness timeout or failure to start the hook shell can still fail open; these scripts are guardrails, not a sandbox.
 See [Codex's hook contract](https://learn.chatgpt.com/docs/hooks) for the trust and decision semantics.
 
 After an adapter denial, the agent reports the exact operation and reason and stops.
@@ -74,7 +75,8 @@ The `dcg allow-once` mechanism below applies only to a dcg denial, not an adapte
 
 Codex 0.163.0 can send a shell hook the session directory rather than the individual command's working directory.
 Use `git -C <repo>` for directory-sensitive Git operations and explicit paths for configuration files.
-The Cloudflare adapter matches `^mcp__.*cloudflare-api__execute$`; another connector name or arbitrary HTTP client is not covered by that matcher.
+The Cloudflare adapter accepts both `cloudflare-api__execute` and Codex's normalized `cloudflare_api__execute` suffixes on MCP tool names.
+Another connector name or arbitrary HTTP client is not covered by that matcher.
 
 ### Skill portability
 

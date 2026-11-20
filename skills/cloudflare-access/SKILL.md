@@ -31,6 +31,7 @@ In Claude Code, when the guard asks from a subagent, the prompt goes to the owne
 In a headless run (`claude -p`, no one to answer) the ask becomes a refusal: report what you wanted to change and why, and stop.
 In Codex, the adapter returns a denial rather than opening a confirmation prompt, including in interactive sessions.
 The owner must review and trust the hook through `/hooks` before it runs.
+The adapter also accepts Codex's normalized `cloudflare_api__execute` suffix and passes it to the same parser.
 After a denial, report the exact operation and reason and wait for the owner's instructions; approval in chat does not disable the guard or authorize changing tools to get around it.
 An owner can perform an approved operation themselves, after the required export, and have the agent verify it with a read-only call.
 This matcher does not cover a different connector's tool names or arbitrary HTTP clients; do not assume those paths have equivalent enforcement.

@@ -12,10 +12,10 @@ How my coding agents (Claude Code and Codex) are set up: the rules every session
 | `home/.claude/hooks/` | `confirm-destructive-git.sh`: asks before repo deletes, secret changes, permission changes, force pushes, and `pass-env`/`hushkey` `run`/`pipe` to anything but the known deploy and test tools (inline code, script paths and custom configs ask). It also asks before `--no-mask`, restic, the Hushkey backup files, unit and script, Windows Hello unlocks and helper runs, R2 bucket deletes and lock changes, and releases (v* tags, `gh release`, publish, release scripts). Tests: `confirm-destructive-git.test.sh`, which also checks the settings.json permission rules. `confirm-cloudflare-delete.sh`: asks before the Cloudflare connector's `execute` tool runs code that deletes or cannot be undone (see below). Tests: `confirm-cloudflare-delete.test.sh`. | `~/.claude/hooks/` |
 | `bin/` | `trash` (move instead of delete), `agent-lock` (the config lock) and `gpu-run` (measure and log jobs on the graphics card; see below). | `~/.local/bin/` |
 | `home/.config/dcg/` | Destructive command guard settings, exceptions and the `n8` rule pack for my databases and hosts. | `~/.config/dcg/` |
-| `home/.codex/config.hooks.toml` | The dcg hook for Codex. | A marked block inside `~/.codex/config.toml` |
+| `home/.codex/config.hooks.toml` | Codex registrations for dcg, the shared guard adapter, instruction normalization, the commit reminder and the startup config check. | A marked block inside `~/.codex/config.toml` |
 | `home/.codex/rules/guardrails.rules` | Codex command rules mirroring the Claude permission rules where a fixed command prefix can express them. Tests: `guardrails.test.sh`. | `~/.codex/rules/guardrails.rules` |
 | `home/.npmrc`, `home/.config/pnpm/config.yaml` | Install cooldown: npm and pnpm only pick package versions published at least 3 days ago. | A marked block inside `~/.npmrc` and `~/.config/pnpm/config.yaml` |
-| `home/.config/agent-hooks/` | Hooks shared by Claude and Codex (keep `AGENTS.md` as the real file, remind to commit). | `~/.config/agent-hooks/` |
+| `home/.config/agent-hooks/` | Shared lifecycle hooks and the Codex adapter for the existing Git and Cloudflare guard scripts. | `~/.config/agent-hooks/` |
 
 ## Playbooks use the open skill format
 
@@ -45,6 +45,53 @@ Only the description sits in an agent's context every session; the steps load wh
 - Keep `AGENTS.md` short: only what helps almost every session. A procedure with a clear trigger becomes a playbook; a narrow rule with no trigger gets deleted.
 - No secrets, ever. They live in `pass` and load through [pass-env](https://github.com/n8watkins/pass-env). The secret scan workflow fails any push that contains one.
 - Settings are copied, not linked, because Claude Code rewrites its settings file; `install.sh` tells you when your live copy has drifted.
+
+## Claude and Codex parity
+
+Both agents use the same 14 playbooks and global instructions.
+The aim is the same working habits and safety decisions, while respecting each harness's tool and permission model.
+There is no automatic no-mistakes pipeline or new validation Stop hook.
+Repository checks remain part of doing the work; the existing Stop hook only reminds the agent about uncommitted changes.
+
+| Behavior | Claude Code | Codex |
+| --- | --- | --- |
+| Normalize project instructions and remind to commit | Shared lifecycle scripts | Same scripts |
+| Destructive shell commands | dcg plus the Git guard | dcg plus the same Git guard through the adapter |
+| Matching Cloudflare MCP execute calls | Cloudflare guard asks | Same guard through the adapter denies |
+| Configuration changes | Startup check and ConfigChange hook | Startup check; no equivalent ConfigChange hook is registered |
+| Hook activation | Settings registration | Registration plus owner trust in `/hooks` |
+
+The Codex adapter converts an ask decision into a supported denial.
+It does not approve calls, copy the parser logic or treat Codex's permission mode as Claude's auto-mode classifier.
+If the selected guard crashes, returns invalid output or exceeds the adapter's deadline, the adapter denies the call.
+An unavailable adapter interpreter or a failure before the adapter starts remains a harness-level failure; these scripts are guardrails, not a sandbox.
+See [Codex's hook contract](https://learn.chatgpt.com/docs/hooks) for the trust and decision semantics.
+
+After an adapter denial, the agent reports the exact operation and reason and stops.
+The owner can perform an approved operation in their own terminal, then ask the agent to verify the result.
+Approval in chat does not change a hook denial, and the agent must not switch tools or rewrite the command to get around it.
+The `dcg allow-once` mechanism below applies only to a dcg denial, not an adapter denial.
+
+Codex 0.163.0 can send a shell hook the session directory rather than the individual command's working directory.
+Use `git -C <repo>` for directory-sensitive Git operations and explicit paths for configuration files.
+The Cloudflare adapter matches `^mcp__.*cloudflare-api__execute$`; another connector name or arbitrary HTTP client is not covered by that matcher.
+
+### Skill portability
+
+The shared playbooks already cover the owner's cross-agent workflows.
+Additional local Claude skills are not copied wholesale into dotfiles:
+
+| Local skill | Decision |
+| --- | --- |
+| `gh-axi` | Keep optional. The existing GitHub connector or `gh` supports the workflow, and the command guard does not treat every alternate CLI as equivalent to `gh`. Its raw-secret example must not replace `pass-env pipe`. |
+| `chrome-devtools-axi` | Keep optional. Use the browser tool available in the current harness, with the existing Windows and GPU playbooks when applicable. |
+| `gnhf` | Keep tied to an explicitly requested GNHF run rather than ordinary coding tasks. |
+| `prev-req` | Keep Claude-specific; it searches Claude transcripts and must not claim to locate a Codex session. |
+| `sentry-cli` | Keep optional for Sentry work. Check the installed CLI before adopting its large command reference. |
+| `no-mistakes` | Leave on demand and managed by its existing installation; it is not a prerequisite for normal work. |
+
+Handoff, browser-testing and preview playbooks keep their existing task triggers.
+Shared file content gives both agents the same guidance, but does not guarantee identical automatic skill selection.
 
 ## Destructive command guard
 

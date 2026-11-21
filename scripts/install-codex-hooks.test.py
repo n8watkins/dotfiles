@@ -194,6 +194,34 @@ class InstallCodexHooksTest(unittest.TestCase):
                 self.assertNotIn("do not discard", result.stderr)
                 self.assertEqual(self.config.read_text(), data)
 
+    def test_refuses_to_relocate_custom_hooks_with_saved_state(self):
+        for index, state in (
+            (1, 'trusted_hash = "sha256:owner-approved"'),
+            (1, "enabled = false"),
+            (2, "enabled = false"),
+        ):
+            with self.subTest(index=index, state=state):
+                key = f"{self.config}:pre_tool_use:{index}:0"
+                custom_state = f'[hooks.state."{key}"]\n{state}\n\n'
+                data = OWNER_SETTINGS + START + STOP + TRUST + custom_state + OLD_BLOCK + CUSTOM_HOOK
+                self.config.parent.mkdir(exist_ok=True)
+                self.config.write_text(data)
+                result = self.run_install(full=False, check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"pre_tool_use:{index}:0", result.stderr)
+                self.assertNotIn("/usr/bin/true", result.stderr)
+                self.assertEqual(self.config.read_text(), data)
+
+    def test_keeps_saved_state_for_unmoved_custom_hooks(self):
+        key = f"{self.config}:pre_tool_use:0:0"
+        custom_state = f'[hooks.state."{key}"]\nenabled = false\n\n'
+        self.seed(OWNER_SETTINGS + START + STOP + TRUST + custom_state + CUSTOM_HOOK + OLD_BLOCK)
+        self.run_install()
+        hooks = tomllib.loads(self.config.read_text())["hooks"]
+        self.assertFalse(hooks["state"][key]["enabled"])
+        self.assertEqual(hooks["PreToolUse"][0]["hooks"][0]["command"], "/usr/bin/true")
+        self.assert_second_install_is_identical()
+
     def test_missing_guard_executables_block_and_dcg_keeps_its_reason(self):
         self.run_install(full=False)
         dcg, adapter = tomllib.loads(self.config.read_text())["hooks"]["PreToolUse"]
@@ -208,11 +236,17 @@ class InstallCodexHooksTest(unittest.TestCase):
 
         dcg_file = self.home / ".local/bin/dcg"
         dcg_file.parent.mkdir(parents=True)
-        dcg_file.write_text("#!/bin/sh\nprintf 'Blocked by dcg\\n' >&2\nexit 2\n")
+        dcg_file.write_text("#!/bin/sh\nexit 2\n")
         dcg_file.chmod(0o700)
         result = subprocess.run(["/bin/sh", "-c", dcg_command], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
-        self.assertEqual(result.stderr, "Blocked by dcg\n")
+        self.assertIn("could not run dcg", result.stderr)
+
+        dcg_file.write_text("#!/bin/sh\nprintf 'Blocked by dcg\\n' >&2\nexit 2\n")
+        result = subprocess.run(["/bin/sh", "-c", dcg_command], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Blocked by dcg\n", result.stderr)
+        self.assertIn("could not run dcg", result.stderr)
 
 
 if __name__ == "__main__":

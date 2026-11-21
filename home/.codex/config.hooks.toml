@@ -7,7 +7,7 @@ matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/home/natkins/.local/bin/dcg || { dcg_exit=$?; if [ \"$dcg_exit\" -ne 2 ]; then printf '%s\\n' 'Codex could not run dcg. Report this block to the owner.' >&2; fi; exit 2; }"
+command = "/home/natkins/.local/bin/dcg || { printf '%s\\n' 'Codex could not run dcg successfully. Report this block to the owner.' >&2; exit 2; }"
 
 # Confirmations shared with Claude Code.
 [[hooks.PreToolUse]]

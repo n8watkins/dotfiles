@@ -79,16 +79,18 @@ def split_block(text):
 
 
 def extract_known_groups(config, variants, tool_paths):
-    """Separate exact hook groups for verification while retaining group order."""
+    """Separate known groups and record each custom handler's positional key."""
     hooks = config.get("hooks", {})
     found = {}
+    custom_positions = []
     for event, groups in variants.items():
         if event not in hooks:
             continue
         if not isinstance(hooks[event], list):
             raise ValueError(f"unexpected format for {event} hook groups")
         retained = []
-        for group in hooks[event]:
+        event_key = re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower()
+        for index, group in enumerate(hooks[event]):
             if group in groups:
                 found.setdefault(event, []).append(group)
             elif any(
@@ -99,13 +101,35 @@ def extract_known_groups(config, variants, tool_paths):
                 raise ValueError(f"customized {event} hook uses a dotfiles hook command")
             else:
                 retained.append(group)
+                custom_positions.extend(
+                    f"{event_key}:{index}:{handler}"
+                    for handler, _ in enumerate(group.get("hooks", []))
+                )
         if retained:
             hooks[event] = retained
         else:
             del hooks[event]
     if not hooks:
         config.pop("hooks", None)
-    return found
+    return found, custom_positions
+
+
+def check_custom_hook_state(config, home, old_positions, new_positions):
+    changes = {
+        position
+        for old, new in zip(old_positions, new_positions, strict=True)
+        if old != new
+        for position in (old, new)
+    }
+    if not changes:
+        return
+    state = config.get("hooks", {}).get("state", {})
+    sources = {str(path / ".codex/config.toml") for path in (home, home.resolve(), ORIGINAL_HOME)}
+    for key in state:
+        parts = key.rsplit(":", 3)
+        position = ":".join(parts[1:])
+        if parts[0] in sources and position in changes:
+            raise ValueError(f"migrating would change a custom hook's saved state binding ({position})")
 
 
 def updated_config(text, template, home):
@@ -137,7 +161,7 @@ def updated_config(text, template, home):
         for path in (home, ORIGINAL_HOME)
     }
     original = tomllib.loads(text)
-    extract_known_groups(original, variants, tool_paths)
+    _, old_positions = extract_known_groups(original, variants, tool_paths)
 
     for section in legacy_sections:
         for line_ending in ("\n", "\r\n"):
@@ -151,10 +175,12 @@ def updated_config(text, template, home):
     contents = f"{BEGIN}\n{desired.rstrip()}\n{END}\n".replace("\n", newline)
     updated = before + contents + after
     parsed = tomllib.loads(updated)
-    if extract_known_groups(parsed, variants, tool_paths) != desired_hooks:
+    known, new_positions = extract_known_groups(parsed, variants, tool_paths)
+    if known != desired_hooks:
         raise ValueError("a dotfiles hook is registered outside the recognized blocks")
     if parsed != original:
         raise ValueError("migrating hook blocks would change unrelated Codex config")
+    check_custom_hook_state(original, home, old_positions, new_positions)
     return updated
 
 

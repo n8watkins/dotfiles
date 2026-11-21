@@ -235,6 +235,18 @@ git clone https://github.com/n8watkins/dotfiles.git ~/dotfiles
 
 Existing files are moved aside to `<file>.pre-dotfiles` the first time.
 
+The installer requires Python 3.11 or later for TOML validation.
+It migrates the known earlier Codex lifecycle registrations into the managed block without duplicating them and leaves unrelated settings and trust records intact.
+Customized hook groups, ambiguous markers or relocation of a custom hook with saved positional state stop the migration with an error; inspect that configuration before trying again.
+It never grants hook trust.
+After installation, review all hooks in Codex's `/hooks` menu, including the dcg, guard adapter and startup config check, then restart the session.
+Review any safety-critical changes reported by `agent-lock` in the owner's terminal before approving them.
+Do not run the installer from an unmerged worktree against the live home: installed symlinks would then follow that branch.
+
+The full installer can be checked in a disposable directory with `install.sh --target-home /absolute/fixture/path`.
+This is an installation test destination, not a replacement for the real home or a way to grant trust.
+The fixture tests are `python3 -I scripts/install-codex-hooks.test.py`.
+
 ## Inspired by
 
 [Kun Chen's dotfiles](https://github.com/kunchenguid/dotfiles) and his post on [treating AGENTS.md like a trained model](https://blog.kunchenguid.com/p/your-agentsmd-is-a-neural-net).

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Tests for confirm-destructive-git.sh. Run: bash home/.claude/hooks/confirm-destructive-git.test.sh
+# Pass --codex to run the same hook cases through the Codex adapter.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 hook="$here/confirm-destructive-git.sh"
@@ -7,6 +8,12 @@ hook="$here/confirm-destructive-git.sh"
 # ends the string early and the hook breaks in ways cases may not show.
 if sed -n '/^exec python3 -I -c /,/^. "\$input"$/p' "$hook" | sed '1d;$d' | grep -n "'"; then
   echo "FAIL: a single quote inside the hook's Python (use \\x27)"; exit 1
+fi
+runner=("$hook")
+block=ask
+if [ "${1:-}" = --codex ]; then
+  runner=(python3 -I "$here/../../.config/agent-hooks/codex-pre-tool-use.py")
+  block=deny
 fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -21,16 +28,25 @@ git init -q -b main "$tmp/main" && git -C "$tmp/main" commit -q --allow-empty -m
 fail=0
 hook_cases=0
 rule_cases=0
-run() { # expect(ask|allow) cwd command [permission_mode]
-  local expect=$1 cwd=$2 cmd=$3 mode=${4:-default} out got
+run() { # expect(ask|allow) cwd command [permission_mode] [Codex expectation override]
+  local expect=$1 cwd=$2 cmd=$3 mode=${4:-default} out got rc
+  if [ "$block" = deny ]; then expect=${5:-$expect}; fi
+  if [ "$expect" = ask ]; then expect=$block; fi
   hook_cases=$((hook_cases + 1))
   out=$(jq -n --arg c "$cmd" --arg d "$cwd" --arg m "$mode" \
-    '{tool_input:{command:$c},cwd:$d,permission_mode:$m}' | "$hook" 2>"$tmp/stderr")
-  if [ -s "$tmp/stderr" ]; then
-    printf 'FAIL (hook error: %s): %s\n' "$(cat "$tmp/stderr")" "$cmd"
+    '{tool_name:"Bash",tool_input:{command:$c},cwd:$d,permission_mode:$m}' | "${runner[@]}" 2>"$tmp/stderr")
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -s "$tmp/stderr" ]; then
+    printf 'FAIL (hook error, exit %s: %s): %s\n' "$rc" "$(cat "$tmp/stderr")" "$cmd"
     fail=1
   fi
-  if printf '%s' "$out" | grep -q '"ask"'; then got=ask; else got=allow; fi
+  if [ -z "$out" ]; then
+    got=allow
+  else
+    got=$(jq -r '.hookSpecificOutput
+      | select(.hookEventName == "PreToolUse" and (.permissionDecisionReason | startswith("This command ")))
+      | .permissionDecision' <<<"$out")
+  fi
   if [ "$got" != "$expect" ]; then
     printf 'FAIL (expected %s, got %s): %s\n' "$expect" "$got" "$cmd"
     fail=1
@@ -599,9 +615,9 @@ run allow "$p" 'pass-env run -- npx wrangler d1 execute DB --remote --command "S
 
 # Auto mode: "not on the safe list" is left to the classifier (no decision);
 # every stronger reason still asks there, and other modes keep the ask.
-run allow "$p" 'pass-env run -- curl https://example.com' auto
-run allow "$p" 'pass-env run -- node /tmp/leak.js' auto
-run allow "$p" 'pass-env pipe a/K -- some-tool --read-stdin' auto
+run allow "$p" 'pass-env run -- curl https://example.com' auto deny
+run allow "$p" 'pass-env run -- node /tmp/leak.js' auto deny
+run allow "$p" 'pass-env pipe a/K -- some-tool --read-stdin' auto deny
 run ask   "$p" 'pass-env run -- curl https://example.com' bypassPermissions
 run ask   "$p" 'pass-env run -- curl https://example.com' acceptEdits
 run ask   "$p" 'pass-env run --no-mask -- node scripts/seed.js' auto

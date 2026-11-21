@@ -16,7 +16,8 @@ If a task seems to need one of those, stop and ask the owner; do not look for an
 
 ## What the guard asks about
 
-`~/.claude/hooks/confirm-cloudflare-delete.sh` reads the code of every `execute` call and asks the owner before it runs when the code:
+`~/.claude/hooks/confirm-cloudflare-delete.sh` reads calls whose tool name matches `^mcp__.*cloudflare-api__execute$`.
+Claude Code asks the owner before running the following code; Codex's `codex-pre-tool-use.py` adapter denies it and tells the agent to report it to the owner:
 
 - sends any DELETE request;
 - sets a method it cannot read as GET, POST, PUT or PATCH (a variable it cannot follow to one literal, a call, a getter, a repeated key), or could set one where it does not look (a lone `"DELETE"` string, JSON text, a computed key, `eval`, `Reflect` and similar);
@@ -26,8 +27,14 @@ For wrangler, `permissions.ask` in `~/.claude/settings.json` asks before every `
 
 Write the method as a plain literal (`method: "GET"`) so the guard can read it.
 A constant, a concatenation or a ternary of literals is read too; anything it cannot follow asks.
-When the guard asks from a subagent, the prompt goes to the owner's main session and the call waits for his answer.
+In Claude Code, when the guard asks from a subagent, the prompt goes to the owner's main session and the call waits for his answer.
 In a headless run (`claude -p`, no one to answer) the ask becomes a refusal: report what you wanted to change and why, and stop.
+In Codex, the adapter returns a denial rather than opening a confirmation prompt, including in interactive sessions.
+The owner must review and trust the hook through `/hooks` before it runs.
+The adapter also accepts Codex's normalized `cloudflare_api__execute` suffix and passes it to the same parser.
+After a denial, report the exact operation and reason and wait for the owner's instructions; approval in chat does not disable the guard or authorize changing tools to get around it.
+An owner can perform an approved operation themselves, after the required export, and have the agent verify it with a read-only call.
+This matcher does not cover a different connector's tool names or arbitrary HTTP clients; do not assume those paths have equivalent enforcement.
 Never split, rename, encode or move a blocked call to another door (connector to wrangler, or the reverse).
 
 ## Before deleting anything

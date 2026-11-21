@@ -13,7 +13,7 @@ permissions:
 jobs:
   hooks:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       DCG_VERSION: v0.16.0
       DCG_SHA256: e7d860eba7f99cb5d5535b00942196aae3d6ca22ec049491d74c97aab556b642
@@ -30,8 +30,14 @@ jobs:
           echo "DCG_BIN=$RUNNER_TEMP/dcg" >> "$GITHUB_ENV"
       - name: Git confirmation hook
         run: bash home/.claude/hooks/confirm-destructive-git.test.sh
+      - name: Git confirmation decisions through Codex
+        run: bash home/.claude/hooks/confirm-destructive-git.test.sh --codex
       - name: Cloudflare delete hook
         run: bash home/.claude/hooks/confirm-cloudflare-delete.test.sh
+      - name: Codex adapter protocol and Cloudflare decisions
+        run: python3 -I home/.config/agent-hooks/codex-pre-tool-use.test.py
+      - name: Codex installation and migration
+        run: python3 -I scripts/install-codex-hooks.test.py
       - name: dcg rule pack
         run: bash home/.config/dcg/packs/n8.test.sh
       - name: Config lock

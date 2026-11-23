@@ -1,15 +1,42 @@
 #!/usr/bin/env bash
 # Move files or folders to a dated trash folder instead of deleting them.
-# Kept 14 days, then purged on the next run. Restore with `mv` from the path printed.
+# Kept 3 days (TRASH_KEEP_DAYS), then purged on the next run. Restore with `mv` from the path printed.
+#
+# A trashed folder loses what a command can rebuild: node_modules, .next, .turbo and a Rust
+# `target` beside a Cargo.toml are removed from inside it, so a worktree in the trash costs what
+# its source does and not gigabytes more. After a restore, install and build again.
+# TRASH_KEEP_ALL=1 keeps them.
 set -euo pipefail
 
 root="${TRASH_DIR:-$HOME/.local/share/agent-trash}"
+keep_days="${TRASH_KEEP_DAYS:-3}"
 day="$(date +%Y-%m-%d)"
 mkdir -p "$root/$day"
 chmod 700 "$root" "$root/$day"
 
-# Purge days older than 14 days.
-find "$root" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf -- {} + 2>/dev/null || true
+# Purge the days older than the hold, by the folder's own name (its date), not its mtime:
+# a day's folder changes whenever something is trashed into it or stripped inside it.
+cutoff="$(date -d "$keep_days days ago" +%Y-%m-%d)"
+for d in "$root"/*/; do
+  [ -d "$d" ] || continue
+  name="$(basename -- "$d")"
+  case "$name" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) continue ;;
+  esac
+  if [[ "$name" < "$cutoff" ]]; then rm -rf -- "${root:?}/$name"; fi
+done
+
+# Removes from inside a trashed folder what a command can rebuild. Prints how many folders went.
+strip_rebuildable() {
+  local dest="$1" n=0 found
+  while IFS= read -r -d '' found; do
+    if [ "$(basename -- "$found")" = target ] && [ ! -f "$(dirname -- "$found")/Cargo.toml" ]; then continue; fi
+    rm -rf -- "$found"
+    n=$((n + 1))
+  done < <(find "$dest" -mindepth 1 -type d \( -name node_modules -o -name .next -o -name .turbo -o -name target \) -prune -print0 2>/dev/null)
+  echo "$n"
+}
 
 if [ "$#" -eq 0 ]; then
   echo "usage: trash PATH..." >&2
@@ -27,4 +54,10 @@ for p in "$@"; do
   if [ -e "$dest" ]; then dest="$dest.$(date +%H%M%S)"; fi
   mv -- "$p" "$dest"
   echo "trashed: $abs -> $dest"
+  if [ -d "$dest" ] && [ ! -L "$dest" ] && [ "${TRASH_KEEP_ALL:-}" != 1 ]; then
+    stripped="$(strip_rebuildable "$dest")"
+    if [ "$stripped" -gt 0 ]; then
+      echo "         removed $stripped rebuildable folder(s) inside it (node_modules, build output): install again after a restore"
+    fi
+  fi
 done

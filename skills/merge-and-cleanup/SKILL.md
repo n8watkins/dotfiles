@@ -30,5 +30,5 @@ A worktree is a full copy of the repo plus its own `node_modules` and build cach
 - Delete the local branch once its tip is on GitHub (`git branch -r --contains <sha>` shows a remote branch, or the PR merged).
 - Keep a worktree only when it holds uncommitted or unpushed work, and say so in the report with its path.
 - Stop the dev servers and the test browser (`npx -y chrome-devtools-axi stop`) the lane started.
-- Remove a worktree's folder with `trash <path>` and then `git worktree prune`, so a mistake can still be restored for 14 days.
+- Remove a worktree's folder with `trash <path>` and then `git worktree prune`, so a mistake can still be restored for 3 days (its source and history; `node_modules` and build output are removed, so install again after a restore).
 - Build output (`.next`, `.open-next`, `.turbo`) in a checkout you keep is cache: trash it when a lane is done with it. Keep `node_modules` and `.wrangler` (local dev databases).

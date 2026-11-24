@@ -23,7 +23,7 @@ Never paste the kickoff itself into chat.
 2. Otherwise, search tracked files for handoff documents and inspect likely candidates before selecting the one whose scope matches the current project or workstream.
 3. Do not replace an established scoped handoff with a generic `docs/HANDOFF.md`.
 4. If multiple candidates are plausible and none is clearly canonical, report the ambiguity and ask before overwriting one.
-5. When no handoff exists, use the owner's handoff home: `~/projects/ops/handoffs/<project>/` with `STATUS.md` and `KICKOFF.md`.
+5. When no handoff exists, use the owner's handoff home: `~/ops/handoffs/<project>/` with `STATUS.md` and `KICKOFF.md`.
    Use a repository's own `docs/HANDOFF.md` only when its instructions say so.
    Private state (open decisions, security settings, costs) never goes in a public repository.
 
@@ -100,4 +100,4 @@ End with:
 2. The handoff paths and commit, if any.
 3. Verification, runtime, and push status.
 4. Whether to compact or start fresh, and why.
-5. A one-line prompt for the owner to paste, naming only the kickoff file, for example `Read ~/projects/ops/handoffs/<project>/KICKOFF.md and follow it.`
+5. A one-line prompt for the owner to paste, naming only the kickoff file, for example `Read ~/ops/handoffs/<project>/KICKOFF.md and follow it.`

@@ -1,0 +1,11 @@
+# Once a day, and once after a start if a day was missed (the PC or WSL was off).
+[Unit]
+Description=Purge agent trash older than its hold, daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target

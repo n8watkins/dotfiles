@@ -1,0 +1,8 @@
+# Empties the days of the agent trash that are past their hold (bin/trash, 3 days).
+# Started by agent-trash-purge.timer.
+[Unit]
+Description=Purge agent trash older than its hold
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/trash --purge

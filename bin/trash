@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Move files or folders to a dated trash folder instead of deleting them.
 # Kept 3 days (TRASH_KEEP_DAYS), then purged on the next run. Restore with `mv` from the path printed.
+# `trash --purge` only purges: a daily timer runs it (agent-trash-purge.timer), so old days go
+# even in a week when nothing is trashed.
 #
 # A trashed folder loses what a command can rebuild: node_modules, .next, .turbo and a Rust
 # `target` beside a Cargo.toml are removed from inside it, so a worktree in the trash costs what
@@ -11,21 +13,35 @@ set -euo pipefail
 root="${TRASH_DIR:-$HOME/.local/share/agent-trash}"
 keep_days="${TRASH_KEEP_DAYS:-3}"
 day="$(date +%Y-%m-%d)"
-mkdir -p "$root/$day"
-chmod 700 "$root" "$root/$day"
 
 # Purge the days older than the hold, by the folder's own name (its date), not its mtime:
 # a day's folder changes whenever something is trashed into it or stripped inside it.
-cutoff="$(date -d "$keep_days days ago" +%Y-%m-%d)"
-for d in "$root"/*/; do
-  [ -d "$d" ] || continue
-  name="$(basename -- "$d")"
-  case "$name" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-    *) continue ;;
-  esac
-  if [[ "$name" < "$cutoff" ]]; then rm -rf -- "${root:?}/$name"; fi
-done
+purge() {
+  local cutoff d name
+  cutoff="$(date -d "$keep_days days ago" +%Y-%m-%d)"
+  for d in "$root"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename -- "$d")"
+    case "$name" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+      *) continue ;;
+    esac
+    if [[ "$name" < "$cutoff" ]]; then
+      rm -rf -- "${root:?}/$name"
+      echo "purged: $root/$name"
+    fi
+  done
+}
+
+# Purge only: nothing is trashed and no folder for today is made.
+if [ "$#" -eq 1 ] && [ "$1" = "--purge" ]; then
+  purge
+  exit 0
+fi
+
+mkdir -p "$root/$day"
+chmod 700 "$root" "$root/$day"
+purge > /dev/null
 
 # Removes from inside a trashed folder what a command can rebuild. Prints how many folders went.
 strip_rebuildable() {
@@ -39,7 +55,7 @@ strip_rebuildable() {
 }
 
 if [ "$#" -eq 0 ]; then
-  echo "usage: trash PATH..." >&2
+  echo "usage: trash PATH... | trash --purge" >&2
   exit 2
 fi
 

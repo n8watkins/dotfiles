@@ -71,6 +71,23 @@ for f in "$repo"/home/.config/agent-hooks/*.{sh,py}; do
   link "home/.config/agent-hooks/$(basename "$f")" "$target_home/.config/agent-hooks/$(basename "$f")"
 done
 
+# The daily purge of the agent trash: a user timer, so old days go even when nothing is trashed.
+# Only switched on for the real home; a --target-home install just gets the files.
+link home/.config/systemd/user/agent-trash-purge.service "$target_home/.config/systemd/user/agent-trash-purge.service"
+link home/.config/systemd/user/agent-trash-purge.timer "$target_home/.config/systemd/user/agent-trash-purge.timer"
+if [ "$target_home" != "$HOME" ]; then
+  :
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  systemctl --user daemon-reload
+  if ! systemctl --user is-enabled --quiet agent-trash-purge.timer 2>/dev/null \
+    || ! systemctl --user is-active --quiet agent-trash-purge.timer 2>/dev/null; then
+    systemctl --user enable --now agent-trash-purge.timer
+    echo "enabled agent-trash-purge.timer"
+  fi
+else
+  echo "agent-trash-purge.timer not switched on (no user systemd here): run 'systemctl --user enable --now agent-trash-purge.timer' where there is one"
+fi
+
 # Codex writes other settings and hook trust to this file.
 python3 -I "$repo/scripts/install-codex-hooks.py" "$repo/home/.codex/config.hooks.toml" "$target_home"
 

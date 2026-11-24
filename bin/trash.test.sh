@@ -64,6 +64,20 @@ echo hi > "$work/third.txt"
 TRASH_KEEP_DAYS=1 bash "$here/trash" "$work/third.txt" > /dev/null
 check "TRASH_KEEP_DAYS=1 purges a day 2 days old" '[ ! -e "$TRASH_DIR/$(ago 2)" ]'
 
+# --purge only purges: old days go, kept days and other names stay, nothing is made or moved.
+purge_dir="$work/purge-only"
+mkdir -p "$purge_dir/$(ago 3)/x" "$purge_dir/$(ago 4)/x" "$purge_dir/not-a-date/x"
+out="$(TRASH_DIR="$purge_dir" bash "$here/trash" --purge)"
+check "--purge removes a day 4 days old" '[ ! -e "$purge_dir/$(ago 4)" ]'
+check "--purge keeps a day 3 days old" '[ -d "$purge_dir/$(ago 3)/x" ]'
+check "--purge leaves a folder that is not a date" '[ -d "$purge_dir/not-a-date/x" ]'
+check "--purge makes no folder for today" '[ ! -e "$purge_dir/$today" ]'
+check "--purge says what it purged" 'grep -q "purged: $purge_dir/$(ago 4)" <<<"$out"'
+check "--purge with no trash folder yet succeeds and makes none" 'TRASH_DIR="$work/none" bash "$here/trash" --purge && [ ! -e "$work/none" ]'
+# A file really named --purge can still be trashed by path.
+( cd "$work" && echo hi > ./--purge && bash "$here/trash" ./--purge > /dev/null )
+check "a file named --purge is trashed when given as a path" '[ -f "$TRASH_DIR/$today$work/--purge" ]'
+
 # No arguments is a usage error; a missing path is reported and skipped.
 if bash "$here/trash" > /dev/null 2>&1; then bad "no arguments exits non-zero"; else ok "no arguments exits non-zero"; fi
 check "a missing path is reported" 'bash "$here/trash" "$work/nope" 2>&1 | grep -q "no such file"'

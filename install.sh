@@ -75,7 +75,9 @@ done
 # Only switched on for the real home; a --target-home install just gets the files.
 link home/.config/systemd/user/agent-trash-purge.service "$target_home/.config/systemd/user/agent-trash-purge.service"
 link home/.config/systemd/user/agent-trash-purge.timer "$target_home/.config/systemd/user/agent-trash-purge.timer"
-if [ "$target_home" = "$HOME" ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+if [ "$target_home" != "$HOME" ]; then
+  :
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user daemon-reload
   if ! systemctl --user is-enabled --quiet agent-trash-purge.timer 2>/dev/null \
     || ! systemctl --user is-active --quiet agent-trash-purge.timer 2>/dev/null; then

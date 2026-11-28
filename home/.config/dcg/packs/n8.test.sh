@@ -104,6 +104,19 @@ expect allow 'git branch -D feat/old-branch'
 expect allow 'rm -rf node_modules'
 expect allow 'rm -rf ./dist .next'
 expect allow 'rm -rf /tmp/claude-1000/scratch/build'
+# Agent scratch on the Windows drive: only paths strictly inside it.
+expect allow 'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/pulse-main'
+expect allow 'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/pulse-main/release /mnt/c/Users/natha/AppData/Local/agent-scratch/pulse-shots/'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/../Programs'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/pulse/../../Programs'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/.hidden'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/*'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/Programs/Pulse'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch/pulse-main /mnt/c/Users/natha/Downloads'
+expect deny  'rm -rf /mnt/c/Users/natha/AppData/Local/agent-scratch-other/x'
+expect deny  'rm -rf "/mnt/c/Users/natha/AppData/Local/agent-scratch/$d"'
 
 # False alarms from 2026-11-10, now passing (owner, 2026-11-10).
 # 1. Heredoc text naming Windows launchers, written to a file or held in a

@@ -13,6 +13,17 @@ reason = "Build output and dependency folders are rebuilt on demand"
 risk_acknowledged = true
 added_at = "2026-11-09T00:00:00Z"
 
+# Agent scratch on the Windows drive: Windows builds started from WSL need a
+# target folder on C:, and it fills up fast (35 GB in two days, 2026-11-26).
+# Only paths strictly inside the folder match: the folder itself, anything
+# above it and any ".." segment (a segment cannot start with a dot) stay
+# blocked (owner, 2026-11-27).
+[[allow]]
+pattern = '^rm\s+-(?:rf|fr)\s+(?:/mnt/c/Users/natha/AppData/Local/agent-scratch/[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*/?\s*)+$'
+reason = "Agent scratch on C: holds only rebuildable build output and screenshots"
+risk_acknowledged = true
+added_at = "2026-11-27T00:00:00Z"
+
 # git mv of a loop variable to a literal destination: git only moves tracked
 # files inside the repo and refuses to overwrite without -f, so a rename is
 # undone with git. dcg's mv-dynamic-path rule cannot tell git mv from mv.
